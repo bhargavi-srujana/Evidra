@@ -1,0 +1,51 @@
+{
+  "name": "extract_study",
+  "version": "1.1.0",
+  "target_schema": "Study",
+  "system_prompt": "You are a strict scientific metadata extractor. Extract ONLY information explicitly stated in the provided paper text. NEVER infer, guess, or use external knowledge. If a field is not explicitly reported, return the string \"Not reported\" for it — never null, never omit the key. Return ONLY a valid JSON object matching the Study schema: the root MUST be an object (never a top-level array, never a raw string), with no markdown fences and no commentary.",
+  "user_template": "Extract Study metadata from the paper text below.\n\nReturn a JSON object with exactly these keys: study_id, title, authors (list of {{name, affiliation}}), year (integer), venue, doi, abstract, url, design (object with population, sample_size, intervention, control, task_type, measurement_metric, study_duration, study_type).\n\nRULES:\n1. Use ONLY content from the paper text. Do not hallucinate authors, years, venues, DOIs, or design details.\n2. If a value is missing or ambiguous, use the string \"Not reported\" (for venue/doi/url/design fields use \"Not reported\", never null, never empty-string guesses, never omit the key).\n3. study_id: use the provided ID verbatim if given, else derive as 'study-<first-author-lastname>-<year>' in lowercase.\n4. abstract: copy the abstract verbatim if present, else use the first 3 sentences. Never invent abstract text.\n5. design fields: extract short verbatim phrases; if not reported, \"Not reported\".\n6. Output strict JSON only: a single root object of the form {\"design\": {...}, ...} — never a bare array, never markdown.\n\nstudy_id_hint: {study_id_hint}\n\nPAPER TEXT:\n{paper_text}",
+  "zero_hallucination_rules": [
+    "Only cite content explicitly present in the input text",
+    "Missing data must be the string \"Not reported\" — never invent values, never null",
+    "Never use prior knowledge about the paper, authors, or venue",
+    "Copy abstract/design phrases verbatim; do not paraphrase numbers",
+    "If year/DOI conflicts within text, prefer the title-page value and set all others to \"Not reported\""
+  ],
+  "output_contract": {
+    "type": "object",
+    "required": ["study_id", "title", "authors", "year", "abstract", "design"],
+    "properties": {
+      "study_id": { "type": "string" },
+      "title": { "type": "string" },
+      "authors": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "required": ["name"],
+          "properties": {
+            "name": { "type": "string" },
+            "affiliation": { "type": ["string", "null"] }
+          }
+        }
+      },
+      "year": { "type": "integer" },
+      "venue": { "type": ["string", "null"] },
+      "doi": { "type": ["string", "null"] },
+      "abstract": { "type": "string" },
+      "url": { "type": ["string", "null"] },
+      "design": {
+        "type": "object",
+        "properties": {
+          "population": { "type": ["string", "null"] },
+          "sample_size": { "type": ["string", "null"] },
+          "intervention": { "type": ["string", "null"] },
+          "control": { "type": ["string", "null"] },
+          "task_type": { "type": ["string", "null"] },
+          "measurement_metric": { "type": ["string", "null"] },
+          "study_duration": { "type": ["string", "null"] },
+          "study_type": { "type": ["string", "null"] }
+        }
+      }
+    }
+  }
+}

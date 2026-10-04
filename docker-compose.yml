@@ -1,0 +1,50 @@
+services:
+  mongo:
+    image: mongo:7
+    container_name: evidra-mongo
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: evidra-api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - path: ./backend/.env
+        required: false
+    environment:
+      MONGO_URL: mongodb://mongo:27017
+      MONGO_DB: evidra
+    depends_on:
+      mongo:
+        condition: service_healthy
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  # Frontend service is enabled once frontend/ exists (Phase 1, step 5).
+  # Uncomment after `frontend/package.json` is scaffolded.
+  # frontend:
+  #   image: node:20-alpine
+  #   container_name: evidra-frontend
+  #   working_dir: /app
+  #   ports:
+  #     - "3000:3000"
+  #   volumes:
+  #     - ./frontend:/app
+  #   command: sh -c "npm install && npm run dev"
+  #   environment:
+  #     NEXT_PUBLIC_API_URL: http://localhost:8000
+
+volumes:
+  mongo-data:

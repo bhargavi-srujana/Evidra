@@ -1,0 +1,38 @@
+{
+  "name": "extract_claims",
+  "version": "1.1.0",
+  "target_schema": "{\"claims\": Claim[]}",
+  "system_prompt": "You are a strict scientific claim extractor. Extract ONLY claims explicitly stated in the provided paper text, each grounded in a verbatim evidence span. NEVER infer causal claims, NEVER generalize beyond the text. If no clear claim exists, return {\"claims\": []}. Return ONLY valid JSON: an object with a single 'claims' array field containing Claim objects (strict JSON-object mode requires an object root, never a bare array). No markdown, no commentary.",
+  "user_template": "Extract atomic empirical claims from the paper text below for study_id '{study_id}'.\n\nEach claim must be a JSON object with exactly: claim_id, study_id, text, effect_direction (one of: increases, decreases, no_effect, conditional, unclear), confidence_score (0.0-1.0), evidence_span.\n\nRULES:\n1. text: single atomic finding in the paper's own terms (<= 40 words).\n2. evidence_span: verbatim quote (<= 60 words) from the text supporting the claim. If no verbatim span exists, set evidence_span to null and confidence_score <= 0.4.\n3. effect_direction: increases = positive effect reported; decreases = negative effect; no_effect = null result; conditional = effect only under stated conditions; unclear = ambiguous.\n4. confidence_score: 0.9+ only for direct results-section statements with statistics; 0.6-0.9 for discussion restatements; <= 0.5 for hedged/ambiguous language.\n5. claim_id format: '{study_id}-c1', '{study_id}-c2', ...\n6. study_id must equal '{study_id}' verbatim on every claim.\n7. Missing or uncertain content: use unclear + low confidence, never invent.\n8. Output a strict JSON object of the form {\"claims\": [...]} only — never a bare array. When the text contains no empirical claims, return {\"claims\": []}.\n\nPAPER TEXT:\n{paper_text}",
+  "zero_hallucination_rules": [
+    "Every claim must have a verbatim evidence_span or null with low confidence",
+    "Never merge two findings into one claim",
+    "Never upgrade hedged language ('may', 'suggests') to a definitive direction",
+    "confidence_score must reflect textual certainty, not prior beliefs",
+    "Return {\"claims\": []} when the text contains no empirical claims"
+  ],
+  "output_contract": {
+    "type": "object",
+    "required": ["claims"],
+    "properties": {
+      "claims": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "required": ["claim_id", "study_id", "text", "effect_direction", "confidence_score"],
+          "properties": {
+            "claim_id": { "type": "string" },
+            "study_id": { "type": "string" },
+            "text": { "type": "string" },
+            "effect_direction": {
+              "type": "string",
+              "enum": ["increases", "decreases", "no_effect", "conditional", "unclear"]
+            },
+            "confidence_score": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+            "evidence_span": { "type": ["string", "null"] }
+          }
+        }
+      }
+    }
+  }
+}

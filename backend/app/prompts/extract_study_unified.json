@@ -1,0 +1,52 @@
+{
+  "name": "extract_study_unified",
+  "version": "1.0.0",
+  "target_schema": "{\"design\": StudyDesign, \"claims\": Claim[]}",
+  "system_prompt": "You are a strict scientific extractor. In a SINGLE pass, extract BOTH the study design (PICO) and the atomic empirical claims explicitly stated in the provided paper text. NEVER infer, guess, generalize beyond the text, or use external knowledge. Every claim must be grounded in a verbatim evidence span. If a design field is not explicitly reported, return the string \"Not reported\" for it — never null, never omit the key. If the text contains no empirical claims, return {\"claims\": []}. Return ONLY a valid JSON object of the form {\"design\": {...}, \"claims\": [...]}: the root MUST be an object (strict JSON-object mode requires it — never a top-level array, never a raw string), with no markdown fences and no commentary.",
+  "user_template": "Extract the study design AND atomic empirical claims from the paper text below for study_id '{study_id}'.\n\nReturn a JSON object with exactly two keys: \"design\" and \"claims\".\n\n\"design\" must be an object with exactly: population, sample_size, intervention, control, task_type, measurement_metric, study_duration, study_type. Use short verbatim phrases from the text; any field not explicitly reported must be the string \"Not reported\".\n\n\"claims\" must be an array (possibly empty) of claim objects, each with exactly: claim_id, study_id, text, effect_direction (one of: increases, decreases, no_effect, conditional, unclear), confidence_score (0.0-1.0), evidence_span.\n\nRULES:\n1. text: single atomic finding in the paper's own terms (<= 40 words).\n2. evidence_span: verbatim quote (<= 60 words) supporting the claim. If none exists, set evidence_span to null and confidence_score <= 0.4.\n3. effect_direction: increases = positive effect; decreases = negative effect; no_effect = null result; conditional = effect only under stated conditions; unclear = ambiguous.\n4. confidence_score: 0.9+ only for direct results-section statements with statistics; 0.6-0.9 for discussion restatements; <= 0.5 for hedged/ambiguous language.\n5. claim_id format: '{study_id}-c1', '{study_id}-c2', ...\n6. study_id must equal '{study_id}' verbatim on every claim.\n7. Missing or uncertain content: use unclear + low confidence, never invent.\n8. Output a strict JSON object {\"design\": {...}, \"claims\": [...]} only — never a bare array, never markdown. No claims in text means {\"claims\": []} with design still fully populated.\n\nPAPER TEXT:\n{paper_text}",
+  "zero_hallucination_rules": [
+    "Only cite content explicitly present in the input text",
+    "Missing design data must be the string \"Not reported\" — never invent values, never null",
+    "Every claim must have a verbatim evidence_span or null with low confidence",
+    "Never merge two findings into one claim",
+    "Never upgrade hedged language ('may', 'suggests') to a definitive direction",
+    "confidence_score must reflect textual certainty, not prior beliefs"
+  ],
+  "output_contract": {
+    "type": "object",
+    "required": ["design", "claims"],
+    "properties": {
+      "design": {
+        "type": "object",
+        "properties": {
+          "population": { "type": "string" },
+          "sample_size": { "type": "string" },
+          "intervention": { "type": "string" },
+          "control": { "type": "string" },
+          "task_type": { "type": "string" },
+          "measurement_metric": { "type": "string" },
+          "study_duration": { "type": "string" },
+          "study_type": { "type": "string" }
+        }
+      },
+      "claims": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "required": ["claim_id", "study_id", "text", "effect_direction", "confidence_score"],
+          "properties": {
+            "claim_id": { "type": "string" },
+            "study_id": { "type": "string" },
+            "text": { "type": "string" },
+            "effect_direction": {
+              "type": "string",
+              "enum": ["increases", "decreases", "no_effect", "conditional", "unclear"]
+            },
+            "confidence_score": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+            "evidence_span": { "type": ["string", "null"] }
+          }
+        }
+      }
+    }
+  }
+}

@@ -20,31 +20,13 @@ interface EvidenceSummaryProps {
   className?: string;
 }
 
-const BAR_COLORS = ["#10b981", "#f59e0b", "#f43f5e"];
+const BAR_COLORS = ["#10b981", "#f59e0b", "#f43f5e", "#0ea5e9"];
 
-export function EvidenceSummarySkeleton({ className }: { className?: string }) {
-  return (
-    <div
-      aria-busy="true"
-      aria-label="Loading evidence overview"
-      className={cn(
-        "rounded-2xl border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-950",
-        className,
-      )}
-    >
-      <div className="h-4 w-40 animate-pulse rounded bg-zinc-200 dark:bg-zinc-800" />
-      <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
-        {Array.from({ length: 4 }).map((_, i) => (
-          <div
-            key={i}
-            className="h-20 animate-pulse rounded-lg bg-zinc-100 dark:bg-zinc-900"
-          />
-        ))}
-      </div>
-      <div className="mt-3 h-44 animate-pulse rounded-xl bg-zinc-100 dark:bg-zinc-900" />
-    </div>
-  );
-}
+// Defined in the lightweight skeletons module so routes can show the
+// placeholder without statically pulling recharts into their bundle.
+// NOTE: import it from "@/components/skeletons" to keep the code-split;
+// this alias only preserves backwards compatibility.
+export { EvidenceSummarySkeleton } from "./skeletons";
 
 export default function EvidenceSummaryPanel({
   summary,
@@ -56,6 +38,7 @@ export default function EvidenceSummaryPanel({
       { name: "Positive", count: summary.positive_count },
       { name: "Conditional", count: summary.conditional_count },
       { name: "Negative", count: summary.negative_count },
+      { name: "Unclear", count: summary.unclear_count ?? 0 },
     ],
     [summary],
   );
@@ -75,6 +58,7 @@ export default function EvidenceSummaryPanel({
     { label: "Positive Effects", value: summary.positive_count },
     { label: "Mixed / Conditional", value: summary.conditional_count },
     { label: "No Effect / Negative", value: summary.negative_count },
+    { label: "Unclear / Unstated", value: summary.unclear_count ?? 0 },
   ];
 
   return (
@@ -88,7 +72,7 @@ export default function EvidenceSummaryPanel({
       <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-50">
         Evidence Overview
       </h2>
-      <dl className="mt-3 grid grid-cols-2 gap-2 lg:grid-cols-4">
+      <dl className="mt-3 grid grid-cols-2 gap-2 lg:grid-cols-5">
         {cards.map(({ label, value }) => (
           <div
             key={label}

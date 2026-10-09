@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
 import { Search, Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -19,6 +19,12 @@ export default function QueryBar({
   className,
 }: QueryBarProps) {
   const [query, setQuery] = useState(initialQuery);
+
+  // Results page navigates query-to-query without remounting the header,
+  // so reflect the new question instead of showing a stale input.
+  useEffect(() => {
+    setQuery(initialQuery);
+  }, [initialQuery]);
 
   const handleSubmit = (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();

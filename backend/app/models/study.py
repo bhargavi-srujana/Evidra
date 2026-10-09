@@ -31,9 +31,15 @@ class Study(BaseModel):
     study_id: str
     title: str
     authors: list[Author]
-    year: int = Field(ge=1800, le=2100)
+    # Nullable: unknown publication years stay null so real and missing
+    # years remain distinct (never fabricated as the current year).
+    year: int | None = Field(default=None, ge=1800, le=2100)
     venue: str | None = Field(default=None)
     doi: str | None = Field(default=None)
     abstract: str
     url: str | None = Field(default=None)
     design: StudyDesign = Field(default_factory=StudyDesign)
+    # True when PICO/claims came from the deterministic heuristic fallback
+    # (quota-exhausted / LLM-unconfigured) instead of the LLM. Fallback
+    # records are served to the caller but never frozen into search_cache.
+    is_fallback: bool = False

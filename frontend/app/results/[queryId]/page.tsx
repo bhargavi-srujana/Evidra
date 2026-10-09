@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import dynamic from "next/dynamic";
 import { useParams, useRouter } from "next/navigation";
 import {
   AlertTriangle,
@@ -15,17 +16,28 @@ import {
 
 import QueryBar from "@/components/query-bar";
 import StudyCard from "@/components/study-card";
-import EvidenceSummaryPanel, {
+import {
+  EvidenceGraphSkeleton,
   EvidenceSummarySkeleton,
-} from "@/components/evidence-summary";
+} from "@/components/skeletons";
 import ContradictionExplorer, {
   ContradictionExplorerSkeleton,
 } from "@/components/contradiction-explorer";
-import EvidenceGraph, { EvidenceGraphSkeleton } from "@/components/evidence-graph";
 import ResearchGaps, { ResearchGapsSkeleton } from "@/components/research-gaps";
 import { searchAndCompare } from "@/lib/api";
-import { effectForStudy } from "@/lib/effects";
+import { claimsByStudy, dominantDirection } from "@/lib/effects";
 import type { ComparisonMatrix, SearchResponse } from "@/lib/types";
+
+// Split the two heaviest deps (@xyflow/react, recharts) out of the results
+// page bundle: skeletons paint instantly while the charts stream in.
+const EvidenceGraph = dynamic(
+  () => import("@/components/evidence-graph").then((m) => m.default),
+  { ssr: false, loading: () => <EvidenceGraphSkeleton /> },
+);
+const EvidenceSummaryPanel = dynamic(
+  () => import("@/components/evidence-summary").then((m) => m.default),
+  { ssr: false, loading: () => <EvidenceSummarySkeleton /> },
+);
 
 function SectionHeading({
   icon: Icon,
@@ -60,7 +72,14 @@ export default function ResultsPage() {
   const rawQueryId = Array.isArray(params.queryId)
     ? params.queryId[0]
     : (params.queryId ?? "");
-  const query = decodeURIComponent(rawQueryId ?? "");
+  // Next.js already decodes params once; a literal "%" in the question (e.g.
+  // "100% sleep") makes a second decode throw URIError — fall back safely.
+  let query: string;
+  try {
+    query = decodeURIComponent(rawQueryId ?? "");
+  } catch {
+    query = rawQueryId ?? "";
+  }
 
   const [search, setSearch] = useState<SearchResponse | null>(null);
   const [comparison, setComparison] = useState<ComparisonMatrix | null>(null);
@@ -79,7 +98,7 @@ export default function ResultsPage() {
       try {
         const { search: searchRes, comparison: cmp } = await searchAndCompare(
           query,
-          10,
+          6,
           { signal: controller.signal },
         );
         if (controller.signal.aborted) return;
@@ -104,8 +123,30 @@ export default function ResultsPage() {
     router.push(`/results/${encodeURIComponent(nextQuery)}`);
   };
 
-  const studies = search?.results ?? [];
-  const claims = search?.claims ?? [];
+  const studies = useMemo(() => search?.results ?? [], [search]);
+  const claims = useMemo(() => search?.claims ?? [], [search]);
+
+  // Group once per response instead of re-filtering claims per study on
+  // every render (O(S*C) in StudyCard list + graph + explorer).
+  const effectByStudy = useMemo(() => {
+    const grouped = claimsByStudy(claims);
+    const map = new Map<string, ReturnType<typeof dominantDirection>>();
+    for (const [studyId, studyClaims] of grouped) {
+      map.set(studyId, dominantDirection(studyClaims));
+    }
+    return map;
+  }, [claims]);
+
+  // Primary finding per study (first claim = main finding) so every card
+  // shows its extracted conclusion, not just studies with counted directions.
+  const primaryClaimByStudy = useMemo(() => {
+    const grouped = claimsByStudy(claims);
+    const map = new Map<string, (typeof claims)[number]>();
+    for (const [studyId, studyClaims] of grouped) {
+      if (studyClaims.length > 0) map.set(studyId, studyClaims[0]);
+    }
+    return map;
+  }, [claims]);
 
   return (
     <div className="min-h-screen bg-zinc-50 dark:bg-black">
@@ -258,7 +299,18 @@ export default function ResultsPage() {
                 <StudyCard
                   key={study.study_id}
                   study={study}
-                  effectDirection={effectForStudy(study.study_id, claims)}
+                  effectDirection={effectByStudy.get(study.study_id) ?? null}
+                  conclusion={
+                    primaryClaimByStudy.get(study.study_id)?.conclusion ??
+                    primaryClaimByStudy.get(study.study_id)?.text ??
+                    null
+                  }
+                  evidenceQuote={
+                    primaryClaimByStudy.get(study.study_id)
+                      ?.verbatim_evidence_quote ??
+                    primaryClaimByStudy.get(study.study_id)?.evidence_span ??
+                    null
+                  }
                 />
               ))}
             </div>

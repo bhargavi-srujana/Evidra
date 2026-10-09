@@ -1,16 +1,14 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import { GeistSans as Geist } from "geist/font/sans";
+import { GeistMono as Geist_Mono } from "geist/font/mono";
 import "./globals.css";
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
-  subsets: ["latin"],
-});
+const geistSans = Geist;
+const geistMono = Geist_Mono;
 
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
-  subsets: ["latin"],
-});
+// System font stacks used if the self-hosted Geist variables are unavailable.
+const sansVariable = geistSans?.variable ?? "";
+const monoVariable = geistMono?.variable ?? "";
 
 export const metadata: Metadata = {
   title: "Evidra — Evidence Synthesis Engine",
@@ -22,9 +20,10 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
     <html
       lang="en"
-      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
+      suppressHydrationWarning
+      className={`${sansVariable} ${monoVariable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col">{children}</body>
+      <body suppressHydrationWarning className="min-h-full flex flex-col">{children}</body>
     </html>
   );
 }

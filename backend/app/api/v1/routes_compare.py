@@ -16,9 +16,10 @@ import asyncio
 import logging
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.core.rate_limit import limiter
 from app.db.mongo import get_db
 from app.models.claim import Claim, EffectDirection
 from app.models.comparison import ComparisonMatrix, EvidenceSummary
@@ -130,12 +131,14 @@ def _build_summary(studies: list[Study], claims: list[Claim], gaps: list[str]) -
         negative_count=sum(
             1 for d in directions if d in (EffectDirection.DECREASES, EffectDirection.NO_EFFECT)
         ),
+        unclear_count=sum(1 for d in directions if d == EffectDirection.UNCLEAR),
         key_gaps=gaps,
     )
 
 
 @router.post("/compare", response_model=ComparisonMatrix)
-async def compare_studies(payload: CompareRequest) -> ComparisonMatrix:
+@limiter.limit("20/minute")
+async def compare_studies(request: Request, payload: CompareRequest) -> ComparisonMatrix:
     """Cluster claims, contrast opposing pairs, surface gaps."""
     studies = await _fetch_studies(payload.study_ids)
     studies_by_id = {s.study_id: s for s in studies}

@@ -15,19 +15,23 @@ backward compatibility.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import itertools
 import json
 import logging
 import re
+import threading
 import time
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, AuthenticationError, RateLimitError
 
 from app.core.config import get_settings
 from app.models.claim import Claim
 from app.models.study import StudyDesign
+from app.services.common import normalize_title
 
 logger = logging.getLogger(__name__)
 
@@ -35,18 +39,25 @@ PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 STUDY_PROMPT_FILE = "extract_study.json"
 CLAIMS_PROMPT_FILE = "extract_claims.json"
 UNIFIED_PROMPT_FILE = "extract_study_unified.json"
-MAX_PAPER_CHARS = 6000
+MAX_PAPER_WORDS = 2500
 PLACEHOLDER_API_KEY = "sk-change-me"
 
-# Concurrency guard: at most 2 LLM requests in flight at once, so a 10-15
-# paper search fans out in controlled batches instead of hammering the
-# provider. This is the single choke point — every LLM call flows through
-# _chat_json, so PICO, claim, topic-label, and contradiction-refinement calls
-# are all covered even when callers dispatch with unbounded asyncio.gather.
-MAX_CONCURRENT_LLM_REQUESTS = 2
+# Concurrency guard: at most 4 LLM requests in flight at once, so a search
+# payload fans out in parallel via asyncio.gather while the semaphore keeps
+# bursts from tripping provider rate limits. This is the single choke point
+# — every LLM call flows through _chat_json, so PICO, claim, topic-label,
+# and contradiction-refinement calls are all covered even when callers
+# dispatch with unbounded asyncio.gather.
+MAX_CONCURRENT_LLM_REQUESTS = 4
 LLM_SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT_LLM_REQUESTS)
 # Back-compat alias matching the commonly suggested snippet shape.
 SEMAPHORE = LLM_SEMAPHORE
+
+# Rotation-layer guard: at most 4 concurrent LLM extractions in flight, so a
+# burst of parallel studies with multiple API keys can spread across keys
+# without spiking any single key into a 429. This bounds the key-rotation
+# path in _do_chat_json; the burst cap above still applies when pacing is off.
+EXTRACTION_SEMAPHORE = asyncio.Semaphore(4)
 
 # Throttling: serialize LLM requests so only ONE hits the API at a time, with
 # a minimum pause between request starts (LLM_MIN_INTERVAL_SECONDS). The lock
@@ -90,6 +101,50 @@ _NULL_LITERALS = frozenset(
 
 _client: AsyncOpenAI | None = None
 
+# --- API key rotation pool ---
+# Cyclic iterator over settings.API_KEYS. Refreshed lazily by _next_api_key()
+# whenever the configured keys change (tests mutate settings in place), so the
+# module-level name always reflects current config. next() calls are guarded
+# by _KEY_POOL_LOCK, making rotation safe across threads as well as asyncio
+# tasks sharing the event loop.
+_KEY_POOL_LOCK = threading.Lock()
+_key_pool_snapshot: tuple[str, ...] = ()
+key_pool: Any = itertools.cycle(())
+_clients: dict[str, AsyncOpenAI] = {}
+
+
+def _current_api_keys() -> list[str]:
+    """Configured rotation keys, falling back to the legacy single key."""
+    keys = [k for k in (get_settings().API_KEYS or []) if str(k).strip()]
+    if not keys:
+        legacy = (get_settings().OPENAI_API_KEY or "").strip()
+        if legacy:
+            keys = [legacy]
+    return keys
+
+
+def _next_api_key() -> str:
+    """Next key from the rotating pool (thread-safe). Never returns blank.
+
+    Raises:
+        RuntimeError: no usable key is configured.
+    """
+    global key_pool, _key_pool_snapshot
+    keys = _current_api_keys()
+    if not keys:
+        raise RuntimeError("LLM is not configured (no API keys in rotation pool)")
+    with _KEY_POOL_LOCK:
+        if tuple(keys) != _key_pool_snapshot:
+            _key_pool_snapshot = tuple(keys)
+            key_pool = itertools.cycle(keys)
+        current_key = next(key_pool)
+    return str(current_key)
+
+
+def _pool_size() -> int:
+    """Number of distinct keys currently in the rotation pool (0 if none)."""
+    return len(_current_api_keys())
+
 
 @lru_cache(maxsize=4)
 def load_prompt(filename: str) -> dict[str, Any]:
@@ -99,9 +154,26 @@ def load_prompt(filename: str) -> dict[str, Any]:
 
 
 def is_llm_configured() -> bool:
-    """True when a non-placeholder OpenAI-compatible key is set."""
-    key = (get_settings().OPENAI_API_KEY or "").strip()
-    return bool(key) and key != PLACEHOLDER_API_KEY
+    """True when at least one usable LLM key is in the rotation pool."""
+    return bool(get_settings().API_KEYS)
+
+
+def _get_client_for_key(api_key: str) -> AsyncOpenAI:
+    """Cached async LLM client bound to one rotation-pool key."""
+    key = (api_key or "").strip()
+    client = _clients.get(key)
+    if client is None:
+        settings = get_settings()
+        client = AsyncOpenAI(
+            base_url=settings.OPENAI_BASE_URL,
+            api_key=key,
+            timeout=60.0,
+            # No blind SDK retries: _chat_create() retries 429/503 itself
+            # with quota-aware delays. Blind retries burn quota faster.
+            max_retries=0,
+        )
+        _clients[key] = client
+    return client
 
 
 def _get_client() -> AsyncOpenAI | None:
@@ -145,9 +217,103 @@ def _norm_opt(value: object) -> str | None:
     return text or None
 
 
+# Prompt-injection guard: untrusted spans (user-query entities, third-party
+# paper text) travel inside <user_query> / <paper_content> delimiters per the
+# prompt contracts. Strip delimiter lookalikes from the values before
+# interpolation so a crafted query or poisoned snippet cannot break out of
+# its span and masquerade as trusted instructions.
+_TAG_BREAKOUT_RE = re.compile(r"</?(?:paper_content|user_query)\s*>", re.IGNORECASE)
+
+
+def _sanitize_prompt_span(text: str, max_chars: int = 0) -> str:
+    """Remove XML-delimiter lookalikes from untrusted prompt input."""
+    cleaned = _TAG_BREAKOUT_RE.sub("", text or "").strip()
+    if max_chars > 0:
+        cleaned = cleaned[:max_chars]
+    return cleaned
+
+
+# Any recognized section heading: used to bound kept sections so trailing
+# content (references, appendices, …) never leaks into them. Bare provider
+# abstracts carry no headings and pass through untouched.
+_HEADING_RE = re.compile(
+    r"(?im)^[ \t]*(abstract|introductions?|background|methods?|methodology"
+    r"|results?|findings?|discussions?|conclusions?|references?|bibliography"
+    r"|acknowledgements?|appendix)[ \t]*:?[ \t]*$"
+)
+
+
+def _select_sections(text: str) -> str:
+    """Keep only Abstract / Results (+Findings) / Conclusion sections.
+
+    Full-text pastes are trimmed to the sections extraction actually needs;
+    each kept section ends at the next heading of any kind, so references and
+    appendices are dropped. Inputs without headings (the common
+    provider-abstract case) return as-is.
+    """
+    parts = _HEADING_RE.split(text)
+    if len(parts) < 3:
+        return text
+    sections: dict[str, str] = {}
+    for i in range(1, len(parts), 2):
+        name = parts[i].strip().lower()
+        if name.startswith(("result", "finding")):
+            key: str | None = "results"
+        elif name.startswith("conclusion"):
+            key = "conclusion"
+        elif name.startswith("abstract"):
+            key = "abstract"
+        else:
+            key = None
+        if key is not None and key not in sections and i + 1 < len(parts):
+            sections[key] = parts[i + 1].strip()
+    if not sections:
+        return text
+    ordered = [
+        f"{key.title()}: {sections[key]}"
+        for key in ("abstract", "results", "conclusion")
+        if key in sections
+    ]
+    return "\n\n".join(ordered)
+
+
+def _truncate_words(text: str, max_words: int = MAX_PAPER_WORDS) -> str:
+    """Hard word cap so inputs can never exhaust API token limits."""
+    words = text.split()
+    if len(words) <= max_words:
+        return text
+    return " ".join(words[:max_words])
+
+
 def _build_paper_text(title: str, abstract: str) -> str:
-    text = f"Title: {title.strip()}\nAbstract: {(abstract or '').strip()}"
-    return text[:MAX_PAPER_CHARS]
+    body = _select_sections((abstract or "").strip())
+    text = f"Title: {title.strip()}\nPaper text: {body}"
+    return _truncate_words(text)
+
+
+async def _build_rich_paper_text(
+    title: str,
+    abstract: str,
+    serpapi_result: dict | None = None,
+) -> str:
+    """High-character LLM payload, preferring SerpApi rich context.
+
+    When `serpapi_result` is given, builds the payload via
+    `get_rich_paper_context()` (Strategy 1 rich metadata + Strategy 2
+    open-access PDF text) and applies the same section-selection + word cap.
+    Falls back to the plain title/abstract payload when no result is given,
+    the rich context is empty, or PDF enrichment fails.
+    """
+    if serpapi_result is not None:
+        try:
+            from app.services.search_serp import get_rich_paper_context
+
+            rich = await get_rich_paper_context(serpapi_result)
+            if isinstance(rich, str) and rich.strip():
+                return _truncate_words(_select_sections(rich.strip()))
+        except Exception as exc:  # noqa: BLE001 - enrichment never breaks extraction
+            logger.warning("Rich paper context failed, using title/abstract: %s", exc)
+    return _build_paper_text(title, abstract)
 
 
 def _throttle_interval() -> float:
@@ -205,8 +371,66 @@ def _retry_delay_for(exc: Exception, attempt: int) -> float | None:
     return fallback if fallback <= cap else None
 
 
-async def _chat_create(client: Any, model: str, messages: list[dict[str, str]], use_json: bool) -> Any:
-    """One chat-completions call with quota-aware retries on 429/503."""
+def _is_rate_limit_error(exc: Exception) -> bool:
+    """True for rate-limit/quota exhaustion (429 class) specifically.
+
+    Narrower than _is_retryable_llm_error: only 429s trigger key rotation /
+    model failover. A 503 overload or contract error never switches keys.
+    """
+    if isinstance(exc, RateLimitError):
+        return True
+    text = str(exc).lower()
+    if "response_format" in text:
+        return False
+    if getattr(exc, "status_code", None) == 429:
+        return True
+    return "429" in text or "rate limit" in text or "rate_limit" in text or "quota" in text
+
+
+def _is_auth_error(exc: Exception) -> bool:
+    """True for credential rejection (401 class): invalid/revoked API key.
+
+    Unlike rate limits, this never resolves with retries — but rotation still
+    tries the remaining pool keys (a later key may be valid) before giving up.
+    """
+    if isinstance(exc, AuthenticationError):
+        return True
+    if getattr(exc, "status_code", None) == 401:
+        return True
+    text = str(exc).lower()
+    return (
+        "invalid_api_key" in text
+        or "invalid api key" in text
+        or "incorrect api key" in text
+        or "unauthorized" in text
+        or ("authentication" in text and "error code: 401" in text)
+    )
+
+
+# Count of LLM credential rejections seen since process start. routes_search
+# snapshots this around extraction: auth failures + zero extraction signal
+# means "the key is bad", surfaced as an actionable 502 instead of silently
+# returning hollow "Not reported" records with HTTP 200.
+_AUTH_LOCK = threading.Lock()
+AUTH_FAILURE_COUNT: int = 0
+
+
+def record_auth_failure() -> None:
+    """Thread-safe increment of the credential-rejection counter."""
+    global AUTH_FAILURE_COUNT
+    with _AUTH_LOCK:
+        AUTH_FAILURE_COUNT += 1
+
+
+async def _chat_create(
+    client: Any, model: str, messages: list[dict[str, str]], use_json: bool
+) -> Any:
+    """One chat-completions call with quota-aware retries on 429/503.
+
+    Up to 4 attempts per model (1 initial + LLM_MAX_RETRIES retries):
+    429s honor the server's retry hint, otherwise exponential backoff
+    (5s, 10s, 20s, … capped by LLM_MAX_RETRY_DELAY_SECONDS).
+    """
     max_retries = max(0, int(get_settings().LLM_MAX_RETRIES))
     last_exc: Exception | None = None
     for attempt in range(1 + max_retries):
@@ -223,7 +447,8 @@ async def _chat_create(client: Any, model: str, messages: list[dict[str, str]], 
             if delay is None:
                 raise
             logger.warning(
-                "LLM rate-limited (%s); retry %d/%d in %.1fs",
+                "LLM rate-limited on %s (%s); retry %d/%d in %.1fs",
+                model,
                 type(exc).__name__,
                 attempt + 1,
                 max_retries,
@@ -234,32 +459,118 @@ async def _chat_create(client: Any, model: str, messages: list[dict[str, str]], 
     raise last_exc
 
 
-async def _do_chat_json(system_prompt: str, user_prompt: str) -> Any:
-    """Single chat completion parsed as JSON. Raises on transport/parse failure."""
-    settings = get_settings()
-    client = _get_client()
-    if client is None:
-        raise RuntimeError("LLM is not configured (OPENAI_API_KEY missing)")
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_prompt},
-    ]
+async def _chat_create_with_fallback(
+    client: Any, primary_model: str, messages: list[dict[str, str]], use_json: bool
+) -> Any:
+    """Chat completion with automatic failover on sustained rate limiting.
+
+    The primary model gets its full retry budget first; if it is still
+    rate-limited afterwards (e.g. daily-token exhaustion on
+    openai/gpt-oss-120b), the configured OPENAI_FALLBACK_MODEL is tried with
+    a fresh budget so extraction completes instead of failing the study.
+    """
     try:
-        response = await _chat_create(
-            client, settings.OPENAI_MODEL, messages, use_json=True
+        return await _chat_create(client, primary_model, messages, use_json)
+    except Exception as exc:
+        if not _is_rate_limit_error(exc):
+            raise
+        fallback = (get_settings().OPENAI_FALLBACK_MODEL or "").strip()
+        if not fallback or fallback == primary_model:
+            raise
+        logger.warning(
+            "Primary model %s rate-limited after retries; failing over to %s",
+            primary_model,
+            fallback,
         )
+        return await _chat_create(client, fallback, messages, use_json)
+
+
+async def _create_with_plain_retry(
+    client: Any, model: str, messages: list[dict[str, str]], *, with_failover: bool
+) -> Any:
+    """One attempt with plain-JSON retry when the gateway rejects response_format."""
+    try:
+        if with_failover:
+            return await _chat_create_with_fallback(client, model, messages, use_json=True)
+        return await _chat_create(client, model, messages, use_json=True)
     except Exception as exc:
         # Some OpenAI-compatible gateways reject response_format; retry plain.
         if "response_format" not in str(exc).lower():
             raise
         logger.info("LLM gateway rejected response_format; retrying without it")
-        response = await _chat_create(
-            client, settings.OPENAI_MODEL, messages, use_json=False
-        )
-    content = (response.choices[0].message.content or "").strip()
-    if not content:
-        raise ValueError("LLM returned empty content")
-    return json.loads(_strip_fences(content))
+        if with_failover:
+            return await _chat_create_with_fallback(client, model, messages, use_json=False)
+        return await _chat_create(client, model, messages, use_json=False)
+
+
+async def _do_chat_json(system_prompt: str, user_prompt: str) -> Any:
+    """Single chat completion parsed as JSON. Raises on transport/parse failure.
+
+    Key rotation (capped at 3 concurrent extractions via EXTRACTION_SEMAPHORE):
+    the first attempt runs the primary model on the next pooled key with the
+    full retry + model-failover budget. Each RateLimitError / HTTP 429 rotates
+    to the next key (`current_key = next(key_pool)`) and retries on the
+    lighter fallback model (OPENAI_FALLBACK_MODEL, default
+    llama-3.1-8b-instant). Credential rejections (401) are recorded and also
+    rotate (fail-fast, no sleep). Non-rate-limit errors propagate immediately.
+    When every key is exhausted the last error propagates, and the extractors
+    degrade to the structured title/snippet fallback (never an unhandled
+    exception at the search layer).
+    """
+    settings = get_settings()
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+    pool_size = _pool_size()
+    if pool_size == 0:
+        raise RuntimeError("LLM is not configured (no API keys in rotation pool)")
+    fallback_model = (settings.OPENAI_FALLBACK_MODEL or "").strip() or "llama-3.1-8b-instant"
+    last_exc: Exception | None = None
+    async with EXTRACTION_SEMAPHORE:
+        for rotate_no in range(pool_size):
+            current_key = _next_api_key()
+            client = _get_client_for_key(current_key)
+            if rotate_no == 0:
+                model, with_failover = settings.OPENAI_MODEL, True
+            else:
+                model, with_failover = fallback_model, False
+            try:
+                response = await _create_with_plain_retry(
+                    client, model, messages, with_failover=with_failover
+                )
+            except Exception as exc:  # noqa: BLE001 - inspected for rotation
+                if _is_auth_error(exc):
+                    # Bad/revoked key: fail fast on this key (no sleep), record
+                    # it, and rotate — a later pool key may still be valid.
+                    record_auth_failure()
+                    last_exc = exc
+                    logger.warning(
+                        "LLM rotation %d/%d rejected credentials on %s (%s); trying next key",
+                        rotate_no + 1,
+                        pool_size,
+                        model,
+                        type(exc).__name__,
+                    )
+                    continue
+                if not _is_rate_limit_error(exc):
+                    raise
+                last_exc = exc
+                logger.warning(
+                    "LLM rotation %d/%d rate-limited on %s (%s); trying next key with %s",
+                    rotate_no + 1,
+                    pool_size,
+                    model,
+                    type(exc).__name__,
+                    fallback_model,
+                )
+                continue
+            content = (response.choices[0].message.content or "").strip()
+            if not content:
+                raise ValueError("LLM returned empty content")
+            return json.loads(_strip_fences(content))
+    assert last_exc is not None  # unreachable when pool_size >= 1; keeps type-checkers happy
+    raise last_exc
 
 
 async def _chat_json(system_prompt: str, user_prompt: str) -> Any:
@@ -267,9 +578,13 @@ async def _chat_json(system_prompt: str, user_prompt: str) -> Any:
 
     Guarded twice: free-tier pacing (EXTRACTION_LOCK + minimum interval
     between starts, default 12s for 5 RPM providers) keeps 10-15 parallel
-    study extractions from tripping 429s, and transient 429/503s are retried
-    honoring the server's retry hint; with pacing disabled the LLM_SEMAPHORE
-    burst cap (MAX_CONCURRENT_LLM_REQUESTS) applies instead.
+    study extractions from tripping 429s; transient 429/503s get up to 4
+    attempts per model honoring the server's retry hint, then fail over to
+    OPENAI_FALLBACK_MODEL on sustained rate limiting; with pacing disabled
+    the LLM_SEMAPHORE burst cap (MAX_CONCURRENT_LLM_REQUESTS) applies instead.
+    Underneath, _do_chat_json rotates across the API_KEYS pool (at most 3
+    concurrent rotations via EXTRACTION_SEMAPHORE), retrying rate-limited
+    keys on the lighter fallback model before degrading gracefully.
     """
     global _last_llm_start
     interval = _throttle_interval()
@@ -326,24 +641,36 @@ def _norm_design_field(value: object) -> str:
 
 def _fallback_design() -> StudyDesign:
     """Structured default design: every field honestly marked as unreported."""
-    return StudyDesign(
-        **{name: DESIGN_FALLBACK for name in StudyDesign.model_fields}
-    )
+    return StudyDesign(**{name: DESIGN_FALLBACK for name in StudyDesign.model_fields})
 
 
-async def extract_study_pico(title: str, abstract: str) -> StudyDesign:
+async def extract_study_pico(
+    title: str,
+    abstract: str,
+    serpapi_result: dict | None = None,
+) -> StudyDesign:
     """Extract PICO design fields. Never raises; any failure yields a
     structured fallback design (all fields "Not reported") instead of an
-    empty record, so stored studies always carry displayable PICO data."""
+    empty record, so stored studies always carry displayable PICO data.
+
+    When `serpapi_result` (a raw SerpApi organic result) is provided, the
+    LLM payload is built via `get_rich_paper_context()` — rich metadata
+    (title + publication summary + snippet) plus open-access PDF text —
+    so the model can infer PICO details logically from the extended
+    context instead of defaulting to "Not reported".
+    """
     if not is_llm_configured():
         logger.info("LLM unconfigured; returning fallback StudyDesign")
         return _fallback_design()
     try:
         prompt = load_prompt(STUDY_PROMPT_FILE)
         template = str(prompt["user_template"])
+        paper_text = await _build_rich_paper_text(title, abstract, serpapi_result)
         # Literal .replace (not .format): template contains {{...}} literals.
+        # paper_text is third-party controlled: sanitize delimiter lookalikes
+        # so it cannot break out of its <paper_content> span.
         user = template.replace("{study_id_hint}", "auto").replace(
-            "{paper_text}", _build_paper_text(title, abstract)
+            "{paper_text}", _sanitize_prompt_span(paper_text)
         )
         data = await _chat_json(str(prompt["system_prompt"]), user)
         # Prompt v1.1+ returns a {"design": {...}} object (strict JSON-object
@@ -365,13 +692,37 @@ async def extract_study_pico(title: str, abstract: str) -> StudyDesign:
             )
             return _fallback_design()
         fields = {
-            name: _norm_design_field(design_data.get(name))
-            for name in StudyDesign.model_fields
+            name: _norm_design_field(design_data.get(name)) for name in StudyDesign.model_fields
         }
         return StudyDesign(**fields)
     except Exception as exc:  # noqa: BLE001 - extraction must never break search
         logger.warning("PICO extraction failed for %r: %s", title[:60], exc)
         return _fallback_design()
+
+
+async def extract_pico_from_study(
+    serpapi_result: dict | None = None,
+    title: str = "",
+    abstract: str = "",
+) -> StudyDesign:
+    """Strategy 1 + 2 PICO entry point: rich SerpApi context straight to the LLM.
+
+    Passes `serpapi_result` into `get_rich_paper_context()` to construct the
+    high-character payload (title + publication summary + snippet + PDF text)
+    before sending it to the LLM. `title`/`abstract` are used directly when
+    no `serpapi_result` is given (or to fill gaps when the result lacks
+    them). Never raises; failures yield the "Not reported" fallback design.
+    """
+    resolved_title = title.strip()
+    resolved_abstract = abstract.strip()
+    if serpapi_result is not None and isinstance(serpapi_result, dict):
+        resolved_title = resolved_title or str(serpapi_result.get("title") or "").strip()
+        if not resolved_abstract:
+            snippet = str(serpapi_result.get("snippet") or "").strip()
+            pub = serpapi_result.get("publication_info") or {}
+            summary = str(pub.get("summary") or "").strip() if isinstance(pub, dict) else ""
+            resolved_abstract = snippet or summary
+    return await extract_study_pico(resolved_title, resolved_abstract, serpapi_result)
 
 
 def _coerce_claim(item: object, study_id: str, index: int) -> Claim | None:
@@ -387,6 +738,12 @@ def _coerce_claim(item: object, study_id: str, index: int) -> Claim | None:
         return None
     confidence = min(1.0, max(0.0, confidence))  # clamp, don't drop
     claim_id = str(item.get("claim_id") or "").strip() or f"{study_id}-c{index}"
+    # Strict grounding fields: core finding + exact supporting quote. A
+    # verbatim quote backs up evidence_span when the latter is absent, so
+    # every claim keeps a quotable span whenever the text provides one.
+    conclusion = _norm_conclusion(item.get("conclusion"))
+    verbatim_quote = _norm_opt(item.get("verbatim_evidence_quote"))
+    evidence = _norm_opt(item.get("evidence_span")) or verbatim_quote
     try:
         return Claim(
             claim_id=claim_id,
@@ -394,14 +751,21 @@ def _coerce_claim(item: object, study_id: str, index: int) -> Claim | None:
             text=text,
             effect_direction=direction,  # type: ignore[arg-type]
             confidence_score=confidence,
-            evidence_span=_norm_opt(item.get("evidence_span")),
+            evidence_span=evidence,
+            conclusion=conclusion,
+            verbatim_evidence_quote=verbatim_quote,
         )
     except Exception as exc:  # noqa: BLE001 - skip invalid items, keep rest
         logger.warning("Skipping invalid claim %r: %s", claim_id, exc)
         return None
 
 
-async def extract_study_claims(title: str, abstract: str, study_id: str) -> list[Claim]:
+async def extract_study_claims(
+    title: str,
+    abstract: str,
+    study_id: str,
+    serpapi_result: dict | None = None,
+) -> list[Claim]:
     """Extract atomic findings with EffectDirection. Returns [] on failure."""
     if not is_llm_configured():
         logger.info("LLM unconfigured; returning no claims for %s", study_id)
@@ -409,8 +773,9 @@ async def extract_study_claims(title: str, abstract: str, study_id: str) -> list
     try:
         prompt = load_prompt(CLAIMS_PROMPT_FILE)
         template = str(prompt["user_template"])
+        paper_text = await _build_rich_paper_text(title, abstract, serpapi_result)
         user = template.replace("{study_id}", study_id).replace(
-            "{paper_text}", _build_paper_text(title, abstract)
+            "{paper_text}", _sanitize_prompt_span(paper_text)
         )
         data = await _chat_json(str(prompt["system_prompt"]), user)
         # Prompt v1.1+ returns a {"claims": [...]} object (strict JSON-object
@@ -434,33 +799,196 @@ async def extract_study_claims(title: str, abstract: str, study_id: str) -> list
         return []
 
 
-async def extract_study_unified(
-    title: str, abstract: str, study_id: str
-) -> tuple[StudyDesign, list[Claim]]:
-    """Extract PICO design + claims in a SINGLE LLM call. Never raises.
+def make_study_id(
+    title: str, year: int | None = None, doi: str | None = None
+) -> str:
+    """Deterministic, position-independent study ID.
 
-    Preferred entry point for search: one request per study instead of two,
-    halving latency and free-tier quota burn. Each section degrades
-    independently — a malformed design still keeps valid claims and vice
-    versa; total failure yields ("Not reported" design, []).
+    Uses `sha256(clean DOI)` when a usable DOI exists, else
+    `sha256(normalized_title|year)` — so the same paper retrieved in a
+    different order, page, or query maps to one stable ID (no duplicate
+    Study docs or orphaned claim links). Never raises.
+    """
+    clean_doi = (doi or "").strip().lower().rstrip(".,;").strip()
+    if clean_doi:
+        digest = hashlib.sha256(clean_doi.encode()).hexdigest()
+    else:
+        try:
+            norm = normalize_title(title or "")
+        except Exception:  # noqa: BLE001 - never fail ID generation
+            norm = (title or "").strip().lower()
+        digest = hashlib.sha256(f"{norm}|{year or ''}".encode()).hexdigest()
+    return f"study-{digest[:12]}"
+
+
+# --- Strict factual extraction (grounding) contract ---
+# Verbatim evidence engine rules enforced on every unified extraction call:
+# the LLM may only report what is explicitly stated inside <paper_content>,
+# never infer conclusions from titles/snippets, and must ground each claim
+# in an exact quote.
+STRICT_GROUNDING_SYSTEM_PROMPT = (
+    "You are a verbatim evidence extraction engine for academic papers."
+    " Analyze ONLY the provided text inside <paper_content> tags."
+    " NEVER guess, judge, or infer study conclusions or PICO parameters from paper titles or snippets alone."
+    " If the provided text does not contain explicit findings or a conclusion, set 'conclusion' to 'Unspecified in provided text'."
+)
+
+# Title-inference guard: a suggestive title is a topic label, not a result.
+TITLE_INFERENCE_GUARD = "DO NOT assume a positive or negative finding simply because the paper title asks a question or suggests a relationship (e.g. 'Does X cause Y?'). Base the conclusion strictly on explicit results reported in the text."
+
+# Fallback markers for the grounded claim schema below.
+CONCLUSION_UNSPECIFIED = "Unspecified in provided text"
+FIELD_UNSPECIFIED = "Unspecified in text"
+
+# Expected per-claim JSON schema: every claim carries PICO grounding plus a
+# directly-extracted core finding and its exact supporting quote.
+GROUNDED_CLAIM_SCHEMA = """{
+  "effect_direction": "Positive" | "Negative" | "Conditional" | "No Effect" | "Unspecified",
+  "population": "<target group or 'Unspecified in text'>",
+  "intervention": "<treatment or 'Unspecified in text'>",
+  "control": "<baseline or 'Unspecified in text'>",
+  "outcome": "<metric or 'Unspecified in text'>",
+  "conclusion": "<1-2 sentence core finding extracted directly from abstract/text>",
+  "verbatim_evidence_quote": "<exact quote from the provided text supporting the conclusion>"
+}"""
+
+# Appended to the unified user prompt so each returned claim object carries
+# the grounding fields above (conclusion + verbatim quote).
+GROUNDING_CLAIM_FIELDS_BLOCK = (
+    "\n\nGROUNDING — STRICT FACTUAL EXTRACTION. Every claim object must also "
+    "include exactly these two additional keys:\n"
+    '- "conclusion": 1-2 sentence core finding extracted directly from the '
+    "abstract/text. If the provided text contains no explicit findings, set "
+    "'conclusion' to 'Unspecified in provided text'.\n"
+    '- "verbatim_evidence_quote": exact quote from the provided text '
+    "supporting the conclusion (empty string when no supporting span exists). "
+    "Never paraphrase this quote.\n"
+    "PICO grounding per claim: report population, intervention, control, and "
+    "outcome strictly as stated in the text, using 'Unspecified in text' for "
+    "any element the text does not state. "
+    + TITLE_INFERENCE_GUARD
+)
+
+
+def _grounded_system_prompt(base_system_prompt: str) -> str:
+    """Layer strict verbatim-grounding rules onto the stored system prompt.
+
+    Idempotent: when the stored prompt already carries the grounding contract
+    (e.g. prompt file updated in place), it is returned unchanged instead of
+    duplicating the instructions.
+    """
+    base = (base_system_prompt or "").strip()
+    if "verbatim evidence extraction engine" in base:
+        return base
+    return f"{base}\n\n{STRICT_GROUNDING_SYSTEM_PROMPT}\n\n{TITLE_INFERENCE_GUARD}"
+
+
+def _norm_conclusion(value: object) -> str:
+    """Normalize the grounded conclusion field, never blank.
+
+    Missing or empty conclusions honestly read as 'Unspecified in provided
+    text' so downstream consumers can distinguish grounded findings from
+    absent ones instead of receiving an empty string.
+    """
+    if value is None:
+        return CONCLUSION_UNSPECIFIED
+    text = str(value).strip()
+    return text or CONCLUSION_UNSPECIFIED
+
+
+def _backstop_claim(title: str, abstract: str, study_id: str) -> list[Claim]:
+    """One honest unclear claim so a paper never vanishes from the corpus.
+
+    Used ONLY on the success path when the LLM returns a valid response with
+    zero usable claims (thin snippets, unparseable items). Direction is
+    unclear at low confidence (0.3, the heuristic scale); the evidence span
+    is the leading verbatim words of the snippet/title and the conclusion is
+    the leading sentence(s) — or 'Unspecified in provided text' when even
+    that is absent. Never invents findings; flags the paper as unstated
+    instead of dropping it.
+    """
+    source = (abstract or "").strip() or (title or "").strip()
+    if not source:
+        return []
+    words = source.split()
+    span = " ".join(words[:60]).strip()
+    # Conclusions come from body text only: a title alone is a topic label,
+    # never a finding, so title-only papers honestly read as unspecified.
+    body = (abstract or "").strip()
+    sentences = re.split(r"(?<=[.!?])\s+", body) if body else []
+    conclusion = " ".join(s for s in sentences[:2] if s.strip()).strip()[:500]
+    try:
+        return [
+            Claim(
+                claim_id=f"{study_id}-c1",
+                study_id=study_id,
+                text=" ".join(words[:40]).strip() or source[:200],
+                effect_direction="unclear",  # type: ignore[arg-type]
+                confidence_score=_FALLBACK_CONFIDENCE,
+                evidence_span=span or None,
+                conclusion=conclusion or CONCLUSION_UNSPECIFIED,
+                verbatim_evidence_quote=span or None,
+            )
+        ]
+    except Exception:  # noqa: BLE001 - backstop must never break extraction
+        logger.warning("Backstop claim failed for %s", study_id)
+        return []
+
+
+async def _extract_study_unified_inner(
+    title: str,
+    abstract: str,
+    study_id: str,
+    intervention: str = "",
+    outcome: str = "",
+    serpapi_result: dict | None = None,
+) -> tuple[StudyDesign, list[Claim], bool]:
+    """Unified extraction with explicit fallback provenance flag.
+
+    Same behavior as `extract_study_unified`, plus a third return value:
+    True when the result came from a heuristic/blank fallback (LLM
+    unconfigured, contract violation, or quota-exhausted heuristic) instead
+    of the LLM. Callers mark the Study `is_fallback=True` so fallback
+    records are served but never frozen into search_cache.
     """
     if not is_llm_configured():
         logger.info("LLM unconfigured; returning fallback design, no claims")
-        return _fallback_design(), []
+        return _fallback_design(), [], True
     try:
         prompt = load_prompt(UNIFIED_PROMPT_FILE)
         template = str(prompt["user_template"])
-        user = template.replace("{study_id}", study_id).replace(
-            "{paper_text}", _build_paper_text(title, abstract)
+        paper_text = await _build_rich_paper_text(title, abstract, serpapi_result)
+        # intervention/outcome are raw user-query substrings and paper_text is
+        # third-party controlled: strip delimiter lookalikes (and cap entity
+        # length) so neither can break out of its <user_query>/<paper_content>
+        # span and masquerade as trusted instructions.
+        user = (
+            template.replace("{study_id}", study_id)
+            .replace(
+                "{intervention}",
+                _sanitize_prompt_span(
+                    intervention.strip() or "the studied intervention", 200
+                ),
+            )
+            .replace(
+                "{outcome}",
+                _sanitize_prompt_span(outcome.strip() or "the studied outcome", 200),
+            )
+            .replace("{paper_text}", _sanitize_prompt_span(paper_text))
         )
-        data = await _chat_json(str(prompt["system_prompt"]), user)
+        # Strict factual grounding: require per-claim conclusion + verbatim
+        # quote (idempotent when the stored template already carries it).
+        if "verbatim_evidence_quote" not in template:
+            user = f"{user}{GROUNDING_CLAIM_FIELDS_BLOCK}"
+        system_prompt = _grounded_system_prompt(str(prompt["system_prompt"]))
+        data = await _chat_json(system_prompt, user)
         if not isinstance(data, dict):
             logger.warning(
                 "Unified extraction for %s returned %s, not an object; using fallbacks",
                 study_id,
                 type(data).__name__,
             )
-            return _fallback_design(), []
+            return _fallback_design(), [], True
         design_data = data.get("design", {})
         if isinstance(design_data, dict):
             design = StudyDesign(
@@ -483,6 +1011,15 @@ async def extract_study_unified(
                 for i, item in enumerate(claims_data, start=1)
                 if (claim := _coerce_claim(item, study_id, i)) is not None
             ]
+            if not claims:
+                # Valid LLM response but nothing usable: backstop with one
+                # honest unclear claim so this paper still contributes a
+                # snippet-grounded conclusion instead of vanishing.
+                logger.info(
+                    "Unified extraction returned no usable claims for %s; using backstop",
+                    study_id,
+                )
+                claims = _backstop_claim(title, abstract, study_id)
         else:
             logger.warning(
                 "Unified 'claims' for %s was %s; using no claims",
@@ -490,21 +1027,240 @@ async def extract_study_unified(
                 type(claims_data).__name__,
             )
             claims = []
-        return design, claims
+        return design, claims, False
     except Exception as exc:  # noqa: BLE001 - extraction must never break search
         logger.warning("Unified extraction failed for %s: %s", study_id, exc)
-        return _fallback_design(), []
+        if _is_rate_limit_error(exc):
+            # Quota survived retries + failover: squeeze signal from metadata
+            # with zero further API cost instead of saving a blank record.
+            logger.info("Rate-limited; title/snippet heuristic fallback for %s", study_id)
+            design, claims = extract_study_fallback(
+                title, abstract, study_id, intervention, outcome
+            )
+            return design, claims, True
+        return _fallback_design(), [], True
+
+
+async def extract_study_unified(
+    title: str,
+    abstract: str,
+    study_id: str,
+    intervention: str = "",
+    outcome: str = "",
+    serpapi_result: dict | None = None,
+) -> tuple[StudyDesign, list[Claim]]:
+    """Extract PICO design + claims in a SINGLE LLM call. Never raises.
+
+    Preferred entry point for search: one request per study instead of two,
+    halving latency and free-tier quota burn. ``intervention``/``outcome``
+    (from query normalization) anchor the prompt's direction-polarity rules so
+    effect directions are judged against the tested question, not sentiment
+    words. Each section degrades independently — a malformed design still keeps
+    valid claims and vice versa; total failure yields ("Not reported" design,
+    []).
+
+    When ``serpapi_result`` is provided, the payload is built via
+    `get_rich_paper_context()` (rich metadata + PDF text) so PICO fields can
+    be inferred logically from the extended context.
+    """
+    design, claims, _ = await _extract_study_unified_inner(
+        title, abstract, study_id, intervention, outcome, serpapi_result
+    )
+    return design, claims
+
+
+# --- Deterministic title/snippet fallback (zero LLM calls) ---
+
+_NO_EFFECT_CUES = (
+    "no significant",
+    "not significant",
+    "no effect",
+    "did not",
+    "does not",
+    "do not",
+    "not associated",
+    "no association",
+    "no difference",
+    "null result",
+    "failed to",
+)
+_CONDITIONAL_CUES = (
+    "depends on",
+    "moderated by",
+    "only when",
+    "under certain conditions",
+    "conditional on",
+    "context-dependent",
+)
+_POSITIVE_CUES = (
+    "improv",
+    "increas",
+    "enhanc",
+    "benefit",
+    "better",
+    "higher",
+    "greater",
+    "boost",
+    "effective",
+    "positive",
+    "gain",
+)
+_NEGATIVE_CUES = (
+    "decreas",
+    "reduc",
+    "reduct",
+    "declin",
+    "impair",
+    "worse",
+    "lower",
+    "deficit",
+    "harm",
+    "negative",
+    "detrimental",
+    "disrupt",
+)
+_WITHIN_SUBJECT_CUES = (
+    "within-subject",
+    "within subject",
+    "crossover",
+    "cross-over",
+    "pre-post",
+    "pre post",
+    "self-controlled",
+)
+# Ordered specific -> general; first substring hit wins.
+_POPULATION_CUES: tuple[tuple[str, str], ...] = (
+    ("undergrad", "College students"),
+    ("college", "College students"),
+    ("high school", "High school students"),
+    ("pupil", "School pupils"),
+    ("student", "Students"),
+    ("older adult", "Older adults"),
+    ("elderly", "Older adults"),
+    ("adolescent", "Adolescents"),
+    ("teenager", "Adolescents"),
+    ("child", "Children"),
+    ("infant", "Infants"),
+    ("patient", "Patients"),
+    ("mice", "Mice"),
+    ("mouse", "Mice"),
+    ("rat", "Rats"),
+    ("primate", "Primates"),
+    ("monkey", "Monkeys"),
+    ("women", "Women"),
+    ("men", "Men"),
+    ("adult", "Adults"),
+)
+_SAMPLE_RE = re.compile(
+    r"\b[Nn]\s*=\s*(\d[\d,]*)\b|\b(\d[\d,]*)\s+"
+    r"(participants|subjects|students|patients|volunteers|adults|children)\b"
+)
+_FALLBACK_CONFIDENCE = 0.3
+
+
+def _heuristic_direction(text: str) -> str:
+    """Direction guess from title/snippet cue words (no LLM)."""
+    lowered = text.lower()
+    if any(cue in lowered for cue in _NO_EFFECT_CUES):
+        return "no_effect"
+    if any(cue in lowered for cue in _CONDITIONAL_CUES):
+        return "conditional"
+    positive = sum(lowered.count(cue) for cue in _POSITIVE_CUES)
+    negative = sum(lowered.count(cue) for cue in _NEGATIVE_CUES)
+    if positive > negative:
+        return "increases"
+    if negative > positive:
+        return "decreases"
+    return "unclear"
+
+
+def _heuristic_sample_size(text: str) -> str | None:
+    """Participant count like 'N=120' / '24 participants', else None."""
+    match = _SAMPLE_RE.search(text)
+    if not match:
+        return None
+    if match.group(1):
+        return f"N={match.group(1)}"
+    return f"{match.group(2)} {match.group(3)}"
+
+
+def _heuristic_population(text: str) -> str | None:
+    """Group label from explicit descriptors, else None (never invented)."""
+    lowered = text.lower()
+    for cue, label in _POPULATION_CUES:
+        if cue in lowered:
+            return label
+    return None
+
+
+def extract_study_fallback(
+    title: str,
+    abstract: str,
+    study_id: str,
+    intervention: str = "",
+    outcome: str = "",
+) -> tuple[StudyDesign, list[Claim]]:
+    """Classify direction + PICO from title/snippet only. Never raises, never
+    calls the LLM: safe to use when quota is exhausted. Everything returned is
+    verbatim metadata or an explicit heuristic at low confidence (0.3), so it
+    can never outrank real extractions downstream."""
+    text = f"{title or ''} {abstract or ''}".strip()
+    lowered = text.lower()
+    # Direction cues are read from the abstract/snippet ONLY — never from the
+    # title. Title sentiment ("impair", "negative", ...) describes a topic,
+    # not the paper's finding; judging a conclusion from it mislabels studies.
+    # With no abstract text the honest verdict is "unclear", not a title guess.
+    evidence_text = (abstract or "").strip()
+    direction = _heuristic_direction(evidence_text) if evidence_text else "unclear"
+    design = StudyDesign(
+        population=_heuristic_population(text) or DESIGN_FALLBACK,
+        sample_size=_heuristic_sample_size(text) or DESIGN_FALLBACK,
+        intervention=(intervention or "").strip() or DESIGN_FALLBACK,
+        control=(
+            "Self-controlled / Baseline"
+            if any(cue in lowered for cue in _WITHIN_SUBJECT_CUES)
+            else DESIGN_FALLBACK
+        ),
+        task_type=DESIGN_FALLBACK,
+        measurement_metric=(outcome or "").strip() or DESIGN_FALLBACK,
+        study_duration=DESIGN_FALLBACK,
+        study_type=DESIGN_FALLBACK,
+    )
+    span = " ".join((abstract or title or "").split()[:60]).strip()
+    claims: list[Claim] = []
+    if span:
+        try:
+            claims = [
+                Claim(
+                    claim_id=f"{study_id}-c1",
+                    study_id=study_id,
+                    text=(title or "").strip() or span,
+                    effect_direction=direction,  # type: ignore[arg-type]
+                    confidence_score=_FALLBACK_CONFIDENCE,
+                    evidence_span=span,
+                )
+            ]
+        except Exception:  # noqa: BLE001 - malformed metadata yields no claims
+            claims = []
+    return design, claims
 
 
 __all__ = [
+    "AUTH_FAILURE_COUNT",
     "DESIGN_FALLBACK",
     "EXTRACTION_LOCK",
+    "EXTRACTION_SEMAPHORE",
     "LLM_SEMAPHORE",
     "MAX_CONCURRENT_LLM_REQUESTS",
     "SEMAPHORE",
+    "extract_pico_from_study",
     "extract_study_claims",
+    "extract_study_fallback",
     "extract_study_pico",
     "extract_study_unified",
     "is_llm_configured",
+    "key_pool",
     "load_prompt",
+    "make_study_id",
+    "record_auth_failure",
 ]

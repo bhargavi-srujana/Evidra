@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import {
   ReactFlow,
   Background,
@@ -59,15 +59,11 @@ function truncate(text: string, max = 48): string {
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
 }
 
-export function EvidenceGraphSkeleton() {
-  return (
-    <div
-      aria-busy="true"
-      aria-label="Loading evidence graph"
-      className="h-[380px] w-full animate-pulse rounded-2xl bg-zinc-100 dark:bg-zinc-900"
-    />
-  );
-}
+// Defined in the lightweight skeletons module so routes can show the
+// placeholder without statically pulling @xyflow/react into their bundle.
+// NOTE: import it from "@/components/skeletons" to keep the code-split;
+// this alias only preserves backwards compatibility.
+export { EvidenceGraphSkeleton } from "./skeletons";
 
 export default function EvidenceGraph({
   query,
@@ -270,6 +266,31 @@ export default function EvidenceGraph({
     { label: "Conditional", color: EFFECT_NODE_COLOR.conditional },
   ];
 
+  // Stable callbacks so <ReactFlow> doesn't re-subscribe on every render.
+  const handleNodeClick = useCallback(
+    (_: unknown, node: { id: string }) => {
+      if (node.id === "question") setSelected({ kind: "question" });
+      else if (node.id.startsWith("cluster:"))
+        setSelected({
+          kind: "cluster",
+          clusterId: node.id.slice("cluster:".length),
+        });
+      else if (node.id.startsWith("study:"))
+        setSelected({ kind: "study", studyId: node.id.slice("study:".length) });
+    },
+    [],
+  );
+  const handlePaneClick = useCallback(() => setSelected(null), []);
+
+  // Effect badge for the selected study: computed once, not 3x per render.
+  const selectedEffect = useMemo(
+    () =>
+      selected?.kind === "study"
+        ? effectForStudy(selected.studyId, claims)
+        : null,
+    [selected, claims],
+  );
+
   if (studies.length === 0) {
     return (
       <p className="text-sm text-zinc-500">
@@ -284,20 +305,22 @@ export default function EvidenceGraph({
         <ReactFlow
           nodes={visibleNodes}
           edges={visibleEdges}
-          onNodeClick={(_, node) => {
-            if (node.id === "question") setSelected({ kind: "question" });
-            else if (node.id.startsWith("cluster:"))
-              setSelected({ kind: "cluster", clusterId: node.id.slice("cluster:".length) });
-            else if (node.id.startsWith("study:"))
-              setSelected({ kind: "study", studyId: node.id.slice("study:".length) });
-          }}
-          onPaneClick={() => setSelected(null)}
+          onNodeClick={handleNodeClick}
+          onPaneClick={handlePaneClick}
           fitView
+          fitViewOptions={{ padding: 0.2 }}
+          onlyRenderVisibleElements
           proOptions={{ hideAttribution: true }}
         >
           <Background />
           <Controls />
-          <MiniMap />
+          <MiniMap
+            pannable
+            zoomable
+            style={{ backgroundColor: "#09090b" }}
+            maskColor="rgba(0, 0, 0, 0.55)"
+            className="!m-3 !h-28 !w-44 !overflow-hidden !rounded-xl !border !border-zinc-200 !bg-zinc-950 dark:!border-zinc-800"
+          />
         </ReactFlow>
       </div>
 
@@ -340,15 +363,14 @@ export default function EvidenceGraph({
               ))}
             </ul>
           ) : null}
-          {selected?.kind === "study" &&
-          effectForStudy(selected.studyId, claims) ? (
+          {selected?.kind === "study" && selectedEffect ? (
             <span
               className={cn(
                 "mt-2 inline-flex rounded-full px-2 py-0.5 text-xs font-medium",
-                EFFECT_BADGE[effectForStudy(selected.studyId, claims) ?? "unclear"],
+                EFFECT_BADGE[selectedEffect],
               )}
             >
-              {formatEffectLabel(effectForStudy(selected.studyId, claims) ?? "unclear")}
+              {formatEffectLabel(selectedEffect)}
             </span>
           ) : null}
         </div>

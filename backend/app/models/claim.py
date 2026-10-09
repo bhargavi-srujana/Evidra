@@ -24,3 +24,8 @@ class Claim(BaseModel):
     effect_direction: EffectDirection
     confidence_score: float = Field(ge=0.0, le=1.0)
     evidence_span: str | None = Field(default=None)
+    # Strict factual grounding: 1-2 sentence core finding extracted directly
+    # from the abstract/text ("Unspecified in provided text" when the text
+    # states no explicit findings), plus the exact supporting quote.
+    conclusion: str | None = Field(default=None)
+    verbatim_evidence_quote: str | None = Field(default=None)

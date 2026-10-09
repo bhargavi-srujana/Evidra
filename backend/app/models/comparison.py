@@ -37,6 +37,10 @@ class EvidenceSummary(BaseModel):
     positive_count: int = Field(ge=0)
     conditional_count: int = Field(ge=0)
     negative_count: int = Field(ge=0)
+    # Claims whose direction could not be determined (thin text, hedged
+    # language). Counted explicitly so every retrieved study's finding is
+    # accounted for in the overview instead of silently vanishing.
+    unclear_count: int = Field(default=0, ge=0)
     key_gaps: list[str] = Field(default_factory=list)
 
 

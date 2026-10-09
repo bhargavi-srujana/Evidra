@@ -6,15 +6,44 @@ import { cn } from "@/lib/utils";
 interface StudyCardProps {
   study: Study;
   effectDirection?: EffectDirection | null;
+  conclusion?: string | null;
+  evidenceQuote?: string | null;
   className?: string;
+}
+
+/**
+ * Resolve a safe external href from a study's url/doi, or null when there
+ * is nothing usable. Only http(s) links are allowed: provider-controlled
+ * values like `javascript:` (and relative/invalid URLs) are rejected so a
+ * poisoned record can never become an executable link.
+ */
+export function toSafeExternalUrl(
+  url: string | null | undefined,
+  doi: string | null | undefined,
+): string | null {
+  const trimmedUrl = url?.trim() || "";
+  const trimmedDoi = doi?.trim() || "";
+  const raw = trimmedUrl || (trimmedDoi ? `https://doi.org/${trimmedDoi}` : "");
+  if (!raw) return null;
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
+  return parsed.href;
 }
 
 export default function StudyCard({
   study,
   effectDirection,
+  conclusion,
+  evidenceQuote,
   className,
 }: StudyCardProps) {
   const authorNames = study.authors.map((a) => a.name).join(", ");
+  const sourceUrl = toSafeExternalUrl(study.url, study.doi);
   const picoItems: Array<{ label: string; value: string | null }> = [
     { label: "Population", value: study.design.population },
     { label: "Intervention", value: study.design.intervention },
@@ -67,6 +96,22 @@ export default function StudyCard({
         {study.abstract}
       </p>
 
+      {conclusion ? (
+        <div className="mt-3 rounded-lg border-l-2 border-zinc-300 bg-zinc-50 px-3 py-2 dark:border-zinc-700 dark:bg-zinc-900">
+          <p className="text-xs font-medium uppercase tracking-wide text-zinc-400">
+            Key finding
+          </p>
+          <p className="mt-1 text-sm leading-relaxed text-zinc-700 dark:text-zinc-200">
+            {conclusion}
+          </p>
+          {evidenceQuote ? (
+            <p className="mt-1 line-clamp-2 text-xs italic leading-relaxed text-zinc-500 dark:text-zinc-400">
+              “{evidenceQuote}”
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+
       <dl className="mt-4 grid grid-cols-2 gap-2 text-xs">
         {picoItems.map(({ label, value }) => (
           <div
@@ -85,9 +130,9 @@ export default function StudyCard({
 
       <div className="mt-4 flex items-center justify-between text-xs">
         <span className="font-mono text-zinc-400">{study.study_id}</span>
-        {study.url ?? study.doi ? (
+        {sourceUrl ? (
           <a
-            href={study.url ?? `https://doi.org/${study.doi ?? ""}`}
+            href={sourceUrl}
             target="_blank"
             rel="noopener noreferrer"
             className="inline-flex items-center gap-1 font-medium text-zinc-900 underline-offset-4 hover:underline dark:text-zinc-100"

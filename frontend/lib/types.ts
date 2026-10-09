@@ -49,6 +49,10 @@ export interface Claim {
   effect_direction: EffectDirection;
   confidence_score: number;
   evidence_span: string | null;
+  /** 1-2 sentence core finding extracted directly from the text. */
+  conclusion?: string | null;
+  /** Exact quote from the provided text supporting the conclusion. */
+  verbatim_evidence_quote?: string | null;
 }
 
 export type ImpactLevel = "HIGH" | "MEDIUM" | "LOW";
@@ -73,6 +77,7 @@ export interface EvidenceSummary {
   positive_count: number;
   conditional_count: number;
   negative_count: number;
+  unclear_count: number;
   key_gaps: string[];
 }
 

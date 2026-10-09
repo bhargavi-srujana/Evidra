@@ -18,9 +18,9 @@ import type {
   Study,
 } from "@/lib/types";
 import {
-  EFFECT_BADGE,
-  EFFECT_NODE_COLOR,
+  effectBadge,
   effectForStudy,
+  effectNodeColor,
   formatEffectLabel,
 } from "@/lib/effects";
 import { cn } from "@/lib/utils";
@@ -146,7 +146,7 @@ export default function EvidenceGraph({
     studies.forEach((study, i) => {
       const id = `study:${study.study_id}`;
       const direction = effectForStudy(study.study_id, claims);
-      const color = direction ? EFFECT_NODE_COLOR[direction] : "#71717a";
+      const color = direction ? effectNodeColor(direction) : "#71717a";
       const row = Math.floor(i / perRow);
       const col = i % perRow;
       builtNodes.push({
@@ -253,7 +253,7 @@ export default function EvidenceGraph({
     ).length;
     return {
       title: study.title,
-      subtitle: `${study.authors.map((a) => a.name).join(", ") || "Unknown authors"} · ${study.year}${related > 0 ? ` · ${related} contradiction${related > 1 ? "s" : ""}` : ""}`,
+      subtitle: `${study.authors.map((a) => a.name).join(", ") || "Unknown authors"} · ${study.year ?? "Year unknown"}${related > 0 ? ` · ${related} contradiction${related > 1 ? "s" : ""}` : ""}`,
       lines: studyClaims.slice(0, 5).map((c) => `• ${c.text}`),
     };
   }, [selected, query, studies, clusters, contradictions, claimById, studyById, claims]);
@@ -261,9 +261,9 @@ export default function EvidenceGraph({
   const legend: Array<{ label: string; color: string }> = [
     { label: "Question", color: QUESTION_COLOR },
     { label: "Topic cluster", color: CLUSTER_COLOR },
-    { label: "Positive", color: EFFECT_NODE_COLOR.increases },
-    { label: "Negative", color: EFFECT_NODE_COLOR.decreases },
-    { label: "Conditional", color: EFFECT_NODE_COLOR.conditional },
+    { label: "Positive", color: effectNodeColor("increases") },
+    { label: "Negative", color: effectNodeColor("decreases") },
+    { label: "Conditional", color: effectNodeColor("conditional") },
   ];
 
   // Stable callbacks so <ReactFlow> doesn't re-subscribe on every render.
@@ -367,7 +367,7 @@ export default function EvidenceGraph({
             <span
               className={cn(
                 "mt-2 inline-flex rounded-full px-2 py-0.5 text-xs font-medium",
-                EFFECT_BADGE[selectedEffect],
+                effectBadge(selectedEffect),
               )}
             >
               {formatEffectLabel(selectedEffect)}

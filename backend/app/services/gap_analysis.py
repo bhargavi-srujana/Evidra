@@ -14,7 +14,15 @@ from app.models.study import Study
 MAX_GAPS = 6
 MIN_REPORT_RATE = 0.5  # dimension reported in fewer than half the studies -> gap
 SMALL_SAMPLE_MAX = 50
-_INT_RE = re.compile(r"\d[\d,]*")
+# Sample-size cues only: bare integers are usually years ("2020 study"),
+# so never treat the first integer as N. Prefer explicit N=, then
+# "<num> <participant-unit>".
+_SAMPLE_N_RE = re.compile(r"\b[NMnm]\s*=\s*(\d[\d,]*)")
+_SAMPLE_UNIT_RE = re.compile(
+    r"\b(\d[\d,]*)\s+"
+    r"(participants|subjects|students|patients|volunteers|adults|children|samples?|trials)\b",
+    re.IGNORECASE,
+)
 
 _DIMENSION_LABELS: tuple[tuple[str, str], ...] = (
     ("population", "population"),
@@ -87,9 +95,32 @@ def _mentions(values: list[str], signals: tuple[str, ...]) -> bool:
     return any(s in blob for s in signals)
 
 
+def _norm_variation(value: str) -> str:
+    """Case/whitespace/punctuation-folded key for zero-variation checks."""
+    return re.sub(r"[^a-z0-9]+", "", value.lower())
+
+
 def _parse_int(value: str) -> int | None:
-    match = _INT_RE.search(value.replace(",", ""))
-    return int(match.group(0)) if match else None
+    """Participant count from explicit sample cues, else None.
+
+    `"2020 study, N=30"` yields 30 (N= wins); `"2020 study"` yields None
+    instead of mistaking the year for a sample size.
+    """
+    if not value:
+        return None
+    match = _SAMPLE_N_RE.search(value)
+    if match:
+        try:
+            return int(match.group(1).replace(",", ""))
+        except ValueError:
+            pass
+    match = _SAMPLE_UNIT_RE.search(value)
+    if match:
+        try:
+            return int(match.group(1).replace(",", ""))
+        except ValueError:
+            return None
+    return None
 
 
 def detect_research_gaps(studies: list[Study]) -> list[str]:
@@ -112,7 +143,7 @@ def detect_research_gaps(studies: list[Study]) -> list[str]:
     # 2. Zero-variation dimensions (generalizability untested).
     for field, label in _DIMENSION_LABELS:
         values = _design_values(studies, field)
-        if values and len({v.lower() for v in values}) == 1:
+        if values and len({_norm_variation(v) for v in values}) == 1:
             gaps.append(
                 f"In the retrieved corpus, all studies reporting {label} use "
                 f"'{values[0]}', so variation in {label} is untested."

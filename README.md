@@ -57,6 +57,7 @@ uv sync
 uv run uvicorn app.main:app --reload   # http://127.0.0.1:8000 (docs at /docs)
 
 # Frontend — from frontend/
+copy .env.example .env.local  # then fill in keys (Next.js reads its own env, not backend/.env)
 npm install
 npm run dev              # http://localhost:3000
 ```
@@ -77,9 +78,11 @@ docker compose up --build
 | `OPENAI_BASE_URL` / `OPENAI_API_KEY` / `OPENAI_MODEL` | `https://api.openai.com/v1` / — / `gpt-4o-mini` | Any OpenAI-compatible LLM endpoint |
 | `LLM_MIN_INTERVAL_SECONDS` | `12.0` | Min gap between LLM calls (≈5 RPM; `4.0` ≈ 15 RPM, `0` = off) |
 | `LLM_MAX_RETRIES` / `LLM_MAX_RETRY_DELAY_SECONDS` | `2` / `75.0` | Transient 429/503 retries; larger server hints fail fast |
+| `LLM_QUERY_PARSER` | `True` | LLM fallback parses question shapes regexes miss (`False` = keyword fallback always) |
 | `SERPAPI_API_KEY` / `S2_API_KEY` | empty | Scholar providers (S2 also backfills abstracts) |
 | `MONGO_URL` / `MONGO_DB` | `mongodb://localhost:27017` / `evidra` | Persistence (best-effort; search works without it) |
-| `NEXT_PUBLIC_API_URL` | `http://localhost:8000` | Frontend → backend wiring |
+| `MONGO_USER` / `MONGO_PASSWORD` | `evidra` / `evidra-dev-only-change-me` | Docker Mongo auth (compose only; change before first boot, then `down -v` to re-apply) |
+| `NEXT_PUBLIC_API_URL` | `http://localhost:8000/api/v1` | Frontend → backend wiring (frontend/.env.local; must include the `/api/v1` prefix) |
 
 ## API
 
@@ -92,6 +95,42 @@ docker compose up --build
 
 Each paper costs **1 LLM call**; keep `max_results` small (3–5) on free tiers
 (e.g. Gemini free tier ≈ 5 req/min, 20 req/day per model).
+
+## SerpApi Integration
+
+SerpApi's Google Scholar API is the backend's primary literature source and
+powers the evidence engine end to end (`backend/app/services/search_serp.py`):
+
+- **Scholar search** — `search_google_scholar()` queries the SerpApi
+  `google_scholar` engine and normalizes each organic result (title,
+  `publication_info.summary` with authors/year/venue, `snippet`, DOI, link)
+  into a `RawPaper`. Semantic Scholar acts as fallback when SerpApi is
+  unconfigured, rate-limited, or returns records with missing abstracts.
+- **`resources` PDF parsing (Strategy 2)** — every result's `resources` array
+  is scanned for an open-access PDF (URL path ending in `.pdf` or
+  `file_format == "pdf"`, falling back to a `.pdf` top-level `link`).
+  `fetch_pdf_text_from_link()` verifies the target with a `HEAD` request
+  (`content-type` must contain `application/pdf`), then streams the `GET`
+  body with a strict 3-second timeout and a 10 MB cap, and parses the first
+  2 pages with PyMuPDF (≤ 4,000 chars). Redirects are followed manually so
+  every hop is SSRF-validated; any error or timeout returns `""`
+  immediately without throwing.
+- **Strategy 2 → Strategy 1 cascade** — `get_rich_paper_context()` builds the
+  LLM payload as SerpApi metadata plus `"\n\n[Full-Text Extract from PDF]:\n…"`
+  when PDF text is available, and falls back cleanly to the
+  title/summary/snippet metadata block when there is no PDF link or parsing
+  fails — so extraction always has grounded context, never an empty prompt.
+
+## Hackathon Disclosure
+
+This project was created for the **SerpApi India Hackathon 2026**. AI tools
+used in building it:
+
+- **Groq / OpenAI-compatible LLMs** — single-call PICO study-design +
+  atomic-claim extraction for every retrieved paper (any OpenAI-compatible
+  endpoint works; see `OPENAI_*` keys above).
+- **OpenCode** — AI-assisted development (code navigation, edits, and
+  verification) alongside human design and review.
 
 ## Notes
 

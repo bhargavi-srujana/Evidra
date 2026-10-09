@@ -38,11 +38,12 @@ class Settings(BaseSettings):
         keys: list[str] = []
         for chunk in (self.GROQ_API_KEYS or "").split(","):
             key = chunk.strip().strip("'\"").strip()
-            if key and key not in keys:
+            if key and key != "sk-change-me" and key not in keys:
                 keys.append(key)
         for single in ((self.GROQ_API_KEY or "").strip(), (self.OPENAI_API_KEY or "").strip()):
-            if single and single != "sk-change-me" and single not in keys:
-                keys.append(single)
+            key = single.strip().strip("'\"").strip()
+            if key and key != "sk-change-me" and key not in keys:
+                keys.append(key)
         return keys
 
     def llm_key_warning(self) -> str | None:
@@ -59,31 +60,28 @@ class Settings(BaseSettings):
         base = (self.OPENAI_BASE_URL or "").lower()
         provider = "groq" if "groq" in base else ("openai" if "openai" in base else "custom")
         for key in keys:
-            masked = "%s...%s" % (key[:4], key[-3:])
+            masked = f"{key[:4]}...{key[-3:]}"
             if provider == "groq" and not key.startswith("gsk_"):
                 return (
-                    "LLM key %r does not look like a Groq key (expected gsk_...) "
-                    "for base URL %s; every extraction call will 401."
-                    % (masked, self.OPENAI_BASE_URL)
+                    f"LLM key {masked!r} does not look like a Groq key (expected gsk_...) "
+                    f"for base URL {self.OPENAI_BASE_URL}; every extraction call will 401."
                 )
-            if provider == "openai" and not (
-                key.startswith("sk-") or key.startswith("sess-")
-            ):
+            if provider == "openai" and not key.startswith(("sk-", "sess-")):
                 return (
-                    "LLM key %r does not look like an OpenAI key (expected sk-...) "
-                    "for base URL %s; every extraction call will 401."
-                    % (masked, self.OPENAI_BASE_URL)
+                    f"LLM key {masked!r} does not look like an OpenAI key (expected sk-...) "
+                    f"for base URL {self.OPENAI_BASE_URL}; every extraction call will 401."
                 )
             if len(key) < 20:
-                return "LLM key %r is suspiciously short (%d chars); check for a truncated paste." % (
-                    masked,
-                    len(key),
+                return (
+                    f"LLM key {masked!r} is suspiciously short ({len(key)} chars); "
+                    "check for a truncated paste."
                 )
             if provider == "groq" and len(key) > 80:
                 return (
-                    "LLM key %r has a suspicious length (%d chars; Groq keys are short) — "
-                    "check for a paste error in GROQ_API_KEYS/GROQ_API_KEY/OPENAI_API_KEY; "
-                    "every extraction call will 401 until fixed." % (masked, len(key))
+                    f"LLM key {masked!r} has a suspicious length ({len(key)} chars; "
+                    "Groq keys are short) — check for a paste error in "
+                    "GROQ_API_KEYS/GROQ_API_KEY/OPENAI_API_KEY; "
+                    "every extraction call will 401 until fixed."
                 )
         return None
     # Minimum seconds between LLM request starts (free-tier RPM pacing).
@@ -100,6 +98,11 @@ class Settings(BaseSettings):
     # hanging the request.
     LLM_MAX_RETRIES: int = 3
     LLM_MAX_RETRY_DELAY_SECONDS: float = 75.0
+    # LLM query-parser fallback: when the rule-based parser misses a question
+    # shape (is/are, which/who, why, superlatives, conversational queries),
+    # spend one cached LLM call to extract intervention/outcome/direction
+    # instead of searching unanchored. False forces keyword fallback always.
+    LLM_QUERY_PARSER: bool = True
 
     SERPAPI_API_KEY: str = ""
     S2_API_KEY: str = ""

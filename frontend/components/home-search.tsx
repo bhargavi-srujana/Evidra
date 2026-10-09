@@ -20,7 +20,15 @@ export default function HomeSearch() {
     (query: string) => {
       if (isLoading) return;
       setIsLoading(true);
-      router.push(`/results/${encodeURIComponent(query)}`);
+      try {
+        router.push(`/results/${encodeURIComponent(query)}`);
+      } catch {
+        setIsLoading(false);
+        return;
+      }
+      // Safety: if navigation fails and we stay mounted, don't stick on
+      // "Searching…" forever.
+      setTimeout(() => setIsLoading(false), 5000);
     },
     [router, isLoading],
   );

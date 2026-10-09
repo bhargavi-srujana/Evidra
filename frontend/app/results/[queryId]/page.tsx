@@ -44,34 +44,45 @@ function SectionHeading({
   index,
   title,
   hint,
+  headingId,
 }: {
   icon: typeof GitCompareArrows;
   index: string;
   title: string;
   hint?: string;
+  headingId: string;
 }) {
   return (
     <div className="mb-3">
-      <h2 className="inline-flex items-center gap-2 text-base font-semibold text-zinc-900 dark:text-zinc-50">
-        <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-zinc-900 text-[11px] font-bold text-white dark:bg-zinc-50 dark:text-zinc-900">
+      <h2
+        id={headingId}
+        className="inline-flex items-center gap-2 text-base font-semibold text-zinc-900 dark:text-zinc-50"
+      >
+        <span
+          aria-hidden="true"
+          className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-zinc-900 text-[11px] font-bold text-white dark:bg-zinc-50 dark:text-zinc-900"
+        >
           {index}
         </span>
         <Icon className="h-4 w-4" aria-hidden="true" />
         {title}
       </h2>
       {hint ? (
-        <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">{hint}</p>
+        <p className="mt-1 text-xs text-zinc-600 dark:text-zinc-400">{hint}</p>
       ) : null}
     </div>
   );
 }
 
+const API_DISPLAY_URL =
+  process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000/api/v1";
+
 export default function ResultsPage() {
   const params = useParams<{ queryId: string }>();
   const router = useRouter();
-  const rawQueryId = Array.isArray(params.queryId)
-    ? params.queryId[0]
-    : (params.queryId ?? "");
+  const rawParam = params.queryId;
+  const rawQueryId =
+    typeof rawParam === "string" ? rawParam : (rawParam?.[0] ?? "");
   // Next.js already decodes params once; a literal "%" in the question (e.g.
   // "100% sleep") makes a second decode throw URIError — fall back safely.
   let query: string;
@@ -80,6 +91,8 @@ export default function ResultsPage() {
   } catch {
     query = rawQueryId ?? "";
   }
+  const trimmedQuery = query.trim();
+  const [reloadNonce, setReloadNonce] = useState(0);
 
   const [search, setSearch] = useState<SearchResponse | null>(null);
   const [comparison, setComparison] = useState<ComparisonMatrix | null>(null);
@@ -89,15 +102,17 @@ export default function ResultsPage() {
   useEffect(() => {
     const controller = new AbortController();
     async function load() {
-      if (!query) {
+      // Whitespace-only URLs (e.g. /results/%20) never hit the backend.
+      if (!trimmedQuery) {
         setIsLoading(false);
+        setError("Please enter a research question to search.");
         return;
       }
       setIsLoading(true);
       setError(null);
       try {
         const { search: searchRes, comparison: cmp } = await searchAndCompare(
-          query,
+          trimmedQuery,
           6,
           { signal: controller.signal },
         );
@@ -117,7 +132,7 @@ export default function ResultsPage() {
     }
     void load();
     return () => controller.abort();
-  }, [query]);
+  }, [trimmedQuery, reloadNonce]);
 
   const handleSearch = (nextQuery: string) => {
     router.push(`/results/${encodeURIComponent(nextQuery)}`);
@@ -143,7 +158,8 @@ export default function ResultsPage() {
     const grouped = claimsByStudy(claims);
     const map = new Map<string, (typeof claims)[number]>();
     for (const [studyId, studyClaims] of grouped) {
-      if (studyClaims.length > 0) map.set(studyId, studyClaims[0]);
+      const first = studyClaims.at(0);
+      if (first !== undefined) map.set(studyId, first);
     }
     return map;
   }, [claims]);
@@ -161,6 +177,7 @@ export default function ResultsPage() {
             Home
           </button>
           <QueryBar
+            key={query}
             initialQuery={query}
             isLoading={isLoading}
             onSearch={handleSearch}
@@ -177,76 +194,95 @@ export default function ResultsPage() {
           <h1 className="mt-1 text-2xl font-bold text-zinc-900 dark:text-zinc-50">
             {query || "Untitled question"}
           </h1>
+          {search?.anchor_question ? (
+            <p className="mt-2 text-xs text-zinc-600 dark:text-zinc-400">
+              Effect directions are judged against: “{search.anchor_question}”
+              — “Positive” supports it, “Negative” opposes it. Asking the
+              question the other way round mirrors the verdicts by design.
+            </p>
+          ) : null}
         </div>
 
-        {error ? (
+        {error && !isLoading ? (
           <div
             role="alert"
             className="flex items-start gap-2 rounded-xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200"
           >
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
-            <span>
-              Backend unreachable ({error}). Showing layout placeholders until
-              the API at <code>localhost:8000</code> is running.
-            </span>
+            <div className="min-w-0 flex-1">
+              <p>
+                Request failed ({error}). The API at{" "}
+                <code className="break-all">{API_DISPLAY_URL}</code> may be down.
+              </p>
+              <button
+                type="button"
+                onClick={() => setReloadNonce((n) => n + 1)}
+                className="mt-2 rounded-lg bg-amber-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-amber-800 dark:bg-amber-200 dark:text-amber-950"
+              >
+                Retry
+              </button>
+            </div>
           </div>
         ) : null}
 
         {/* Section 1: Query & Evidence Overview */}
-        <div>
+        <section aria-labelledby="section-overview">
           <SectionHeading
             icon={LineChart}
             index="1"
             title="Query & Evidence Overview"
             hint="Corpus-level finding counts plus year-by-year breakdown."
+            headingId="section-overview"
           />
           {isLoading ? (
             <EvidenceSummarySkeleton />
           ) : comparison ? (
             <EvidenceSummaryPanel summary={comparison.summary} studies={studies} />
-          ) : (
-            <p className="text-sm text-zinc-500">
+          ) : error ? null : (
+            <p role="status" className="text-sm text-zinc-600">
               {studies.length > 0
                 ? "Fewer than two studies retrieved — comparison needs at least two."
                 : "No synthesis yet — comparison results will appear here."}
             </p>
           )}
-        </div>
+        </section>
 
         {/* Section 2: Contradiction Explorer (central feature) */}
-        <div>
+        <section aria-labelledby="section-contradictions">
           <SectionHeading
             icon={GitCompareArrows}
             index="2"
             title="Contradiction Explorer"
             hint="Opposing findings with PICO differences, observed facts, and cautious hypotheses."
+            headingId="section-contradictions"
           />
           {isLoading ? (
             <ContradictionExplorerSkeleton />
           ) : comparison ? (
             <ContradictionExplorer
-              contradictions={comparison.contradictions}
+              contradictions={comparison.contradictions ?? []}
               studies={studies}
               claims={claims}
             />
-          ) : (
-            <p className="text-sm text-zinc-500">
+          ) : error ? null : (
+            <p role="status" className="text-sm text-zinc-600">
               Contradiction analysis will appear here once the corpus is compared.
             </p>
           )}
-        </div>
+        </section>
 
         {/* Section 3: Interactive Evidence Graph */}
-        <div>
+        <section aria-labelledby="section-graph">
           <SectionHeading
             icon={Network}
             index="3"
             title="Interactive Evidence Graph"
             hint="Question → topic clusters → studies. Dashed red edges mark contradictions."
+            headingId="section-graph"
           />
           {isLoading ? (
             <EvidenceGraphSkeleton />
-          ) : (
+          ) : studies.length > 0 ? (
             <EvidenceGraph
               query={query}
               clusters={comparison?.clusters ?? []}
@@ -254,35 +290,41 @@ export default function ResultsPage() {
               claims={claims}
               contradictions={comparison?.contradictions ?? []}
             />
+          ) : error ? null : (
+            <p role="status" className="text-sm text-zinc-600">
+              The evidence graph will appear here once studies are retrieved.
+            </p>
           )}
-        </div>
+        </section>
 
         {/* Section 4: Corpus Research Gaps */}
-        <div>
+        <section aria-labelledby="section-gaps">
           <SectionHeading
             icon={TriangleAlert}
             index="4"
             title="Corpus Research Gaps"
             hint="Missing or under-represented areas — scoped strictly to the retrieved corpus."
+            headingId="section-gaps"
           />
           {isLoading ? (
             <ResearchGapsSkeleton />
           ) : comparison ? (
-            <ResearchGaps gaps={comparison.gaps} />
-          ) : (
-            <p className="text-sm text-zinc-500">
+            <ResearchGaps gaps={comparison.gaps ?? []} />
+          ) : error ? null : (
+            <p role="status" className="text-sm text-zinc-600">
               Gap analysis will appear here once the corpus is compared.
             </p>
           )}
-        </div>
+        </section>
 
         {/* Section 5: Retrieved Papers & Sources */}
-        <div>
+        <section aria-labelledby="section-papers">
           <SectionHeading
             icon={ListOrdered}
             index="5"
             title="Retrieved Papers & Sources"
             hint={`${studies.length} paper${studies.length === 1 ? "" : "s"} with extracted PICO design.`}
+            headingId="section-papers"
           />
           {isLoading ? (
             <div className="space-y-3" aria-busy="true" aria-label="Loading studies">
@@ -314,13 +356,13 @@ export default function ResultsPage() {
                 />
               ))}
             </div>
-          ) : (
-            <p className="flex items-center gap-2 text-sm text-zinc-500">
+          ) : error ? null : (
+            <p role="status" className="flex items-center gap-2 text-sm text-zinc-600">
               <FlaskConical className="h-4 w-4" aria-hidden="true" />
               No studies found for this question yet.
             </p>
           )}
-        </div>
+        </section>
       </main>
     </div>
   );

@@ -41,7 +41,7 @@ export default function ResearchGaps({ gaps, className }: ResearchGapsProps) {
     <ul className={cn("space-y-2", className)}>
       {gaps.map((gap, i) => (
         <li
-          key={`${i}-${gap.slice(0, 24)}`}
+          key={`${i}-${gap.length}-${gap.slice(0, 48)}`}
           className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-100"
         >
           <TriangleAlert

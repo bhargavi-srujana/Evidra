@@ -32,7 +32,22 @@ export function formatEffectLabel(direction: EffectDirection): string {
       return "Conditional";
     case "unclear":
       return "Unclear";
+    default:
+      return "Unknown";
   }
+}
+
+/** Badge class with graceful fallback for unknown backend directions. */
+export function effectBadge(direction: string): string {
+  return (
+    (EFFECT_BADGE as Record<string, string>)[direction] ??
+    "bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+  );
+}
+
+/** Graph node color with graceful fallback for unknown directions. */
+export function effectNodeColor(direction: string): string {
+  return (EFFECT_NODE_COLOR as Record<string, string>)[direction] ?? "#71717a";
 }
 
 /** Majority effect direction across claims; ties resolve to first-seen. */

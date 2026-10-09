@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
@@ -58,6 +57,8 @@ async def ensure_indexes() -> None:
       and stale entries self-evict without app-side cleanup.
     - `studies.study_id` unique and `claims.claim_id` unique for the upsert
       filters used across the search/compare pipeline.
+    - `claims.study_id` (non-unique) for the `_fetch_claims` filter in
+      compare, avoiding full scans as claims grow.
     """
     try:
         try:
@@ -66,14 +67,22 @@ async def ensure_indexes() -> None:
             logger.debug("Mongo unreachable; skipping index setup")
             return
         db = get_db()
-        await asyncio.gather(
-            db["search_cache"].create_index("key", unique=True),
-            db["search_cache"].create_index(
-                "created_at", expireAfterSeconds=SEARCH_CACHE_TTL_SECONDS
+        index_specs = [
+            ("search_cache", "key", {"unique": True}),
+            (
+                "search_cache",
+                "created_at",
+                {"expireAfterSeconds": SEARCH_CACHE_TTL_SECONDS},
             ),
-            db["studies"].create_index("study_id", unique=True),
-            db["claims"].create_index("claim_id", unique=True),
-        )
+            ("studies", "study_id", {"unique": True}),
+            ("claims", "claim_id", {"unique": True}),
+            ("claims", "study_id", {}),
+        ]
+        for coll, key, kwargs in index_specs:
+            try:
+                await db[coll].create_index(key, **kwargs)
+            except Exception as exc:  # noqa: BLE001 - isolate per-index failures
+                logger.warning("Mongo index %s.%s skipped: %s", coll, key, exc)
         logger.info("Mongo indexes ensured")
     except Exception as exc:  # noqa: BLE001 - indexes must never break startup
         logger.warning("Mongo index setup skipped: %s", exc)

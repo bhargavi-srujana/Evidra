@@ -4,11 +4,18 @@ services:
     container_name: evidra-mongo
     restart: unless-stopped
     ports:
-      - "27017:27017"
+      # Loopback-only: the DB is never exposed to the LAN.
+      - "127.0.0.1:27017:27017"
+    environment:
+      # Set MONGO_USER/MONGO_PASSWORD in the environment (or a root .env)
+      # before first boot. Changing these later requires a fresh volume
+      # (`docker compose down -v`) since auth users live in the data dir.
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USER:-evidra}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD:-evidra-dev-only-change-me}
     volumes:
       - mongo-data:/data/db
     healthcheck:
-      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      test: ["CMD-SHELL", "mongosh --quiet -u \"$$MONGO_INITDB_ROOT_USERNAME\" -p \"$$MONGO_INITDB_ROOT_PASSWORD\" --eval \"db.adminCommand('ping')\""]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -20,16 +27,17 @@ services:
     container_name: evidra-api
     restart: unless-stopped
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     env_file:
       - path: ./backend/.env
         required: false
     environment:
-      MONGO_URL: mongodb://mongo:27017
-      MONGO_DB: evidra
+      MONGO_URL: mongodb://${MONGO_USER:-evidra}:${MONGO_PASSWORD:-evidra-dev-only-change-me}@mongo:27017
+      MONGO_DB: ${MONGO_DB:-evidra}
     depends_on:
       mongo:
         condition: service_healthy
+    # Dev default keeps --reload; override command without it for prod.
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
   # Frontend service is enabled once frontend/ exists (Phase 1, step 5).
@@ -44,7 +52,7 @@ services:
   #     - ./frontend:/app
   #   command: sh -c "npm install && npm run dev"
   #   environment:
-  #     NEXT_PUBLIC_API_URL: http://localhost:8000
+  #     NEXT_PUBLIC_API_URL: http://localhost:8000/api/v1
 
 volumes:
   mongo-data:

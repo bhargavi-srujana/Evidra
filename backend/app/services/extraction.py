@@ -69,7 +69,7 @@ EXTRACTION_SEMAPHORE = asyncio.Semaphore(4)
 #   LLM_MIN_INTERVAL_SECONDS=4 -> 15 RPM providers.
 #   LLM_MIN_INTERVAL_SECONDS=1 -> light "1s pause between batches" regime.
 #   LLM_MIN_INTERVAL_SECONDS=0 -> pacing off (paid tier); the semaphore burst
-#     cap above (2 at a time) governs instead.
+#     cap above (4 at a time) governs instead.
 EXTRACTION_LOCK = asyncio.Lock()
 _last_llm_start: float = 0.0
 
@@ -177,23 +177,17 @@ def _get_client_for_key(api_key: str) -> AsyncOpenAI:
 
 
 def _get_client() -> AsyncOpenAI | None:
-    """Shared async LLM client, or None when unconfigured (no hard failure)."""
-    global _client
-    if _client is not None:
-        return _client
-    settings = get_settings()
+    """Shared async LLM client, or None when unconfigured (no hard failure).
+
+    Legacy entry point kept for backward compatibility; delegates to the
+    rotation pool so multi-key setups are never bypassed.
+    """
     if not is_llm_configured():
         return None
-    _client = AsyncOpenAI(
-        base_url=settings.OPENAI_BASE_URL,
-        api_key=settings.OPENAI_API_KEY,
-        timeout=60.0,
-        # No blind SDK retries: _chat_create() below retries 429/503 itself
-        # with quota-aware delays (honoring the server's retry hint). Blind
-        # retries just burn free-tier quota faster.
-        max_retries=0,
-    )
-    return _client
+    try:
+        return _get_client_for_key(_next_api_key())
+    except RuntimeError:
+        return None
 
 
 def _strip_fences(text: str) -> str:
@@ -205,6 +199,28 @@ def _strip_fences(text: str) -> str:
             lines = lines[:-1]
         text = "\n".join(lines).strip()
     return text
+
+
+def _extract_json_substring(text: str) -> str:
+    """Recover JSON when the LLM adds leading/trailing commentary.
+
+    Returns the span from the first `{` to the last `}` when both exist,
+    else the input unchanged so `json.loads` raises normally.
+    """
+    start = text.find("{")
+    end = text.rfind("}")
+    if 0 <= start < end:
+        return text[start : end + 1]
+    return text
+
+
+def _parse_llm_json(content: str) -> Any:
+    """Parse LLM JSON output, tolerating fences and surrounding chatter."""
+    cleaned = _strip_fences(content)
+    try:
+        return json.loads(cleaned)
+    except (json.JSONDecodeError, ValueError):
+        return json.loads(_extract_json_substring(cleaned))
 
 
 def _norm_opt(value: object) -> str | None:
@@ -295,15 +311,21 @@ async def _build_rich_paper_text(
     title: str,
     abstract: str,
     serpapi_result: dict | None = None,
+    prebuilt_rich: str | None = None,
 ) -> str:
     """High-character LLM payload, preferring SerpApi rich context.
 
     When `serpapi_result` is given, builds the payload via
     `get_rich_paper_context()` (Strategy 1 rich metadata + Strategy 2
     open-access PDF text) and applies the same section-selection + word cap.
-    Falls back to the plain title/abstract payload when no result is given,
-    the rich context is empty, or PDF enrichment fails.
+    A caller-prefetched `prebuilt_rich` cascade payload is used as-is (no
+    second PDF fetch). Falls back to the plain title/abstract payload when no
+    result is given, the rich context is empty, or PDF enrichment fails.
     """
+    if prebuilt_rich is not None:
+        if prebuilt_rich.strip():
+            return _truncate_words(_select_sections(prebuilt_rich.strip()))
+        return _build_paper_text(title, abstract)
     if serpapi_result is not None:
         try:
             from app.services.search_serp import get_rich_paper_context
@@ -439,7 +461,7 @@ async def _chat_create(
             if use_json:
                 kwargs["response_format"] = {"type": "json_object"}
             return await client.chat.completions.create(**kwargs)
-        except Exception as exc:  # noqa: BLE001 - inspected for retryability
+        except Exception as exc:  # inspected for retryability
             last_exc = exc
             if attempt >= max_retries or not _is_retryable_llm_error(exc):
                 raise
@@ -539,7 +561,7 @@ async def _do_chat_json(system_prompt: str, user_prompt: str) -> Any:
                 response = await _create_with_plain_retry(
                     client, model, messages, with_failover=with_failover
                 )
-            except Exception as exc:  # noqa: BLE001 - inspected for rotation
+            except Exception as exc:  # inspected for rotation
                 if _is_auth_error(exc):
                     # Bad/revoked key: fail fast on this key (no sleep), record
                     # it, and rotate — a later pool key may still be valid.
@@ -568,7 +590,7 @@ async def _do_chat_json(system_prompt: str, user_prompt: str) -> Any:
             content = (response.choices[0].message.content or "").strip()
             if not content:
                 raise ValueError("LLM returned empty content")
-            return json.loads(_strip_fences(content))
+            return _parse_llm_json(content)
     assert last_exc is not None  # unreachable when pool_size >= 1; keeps type-checkers happy
     raise last_exc
 
@@ -582,6 +604,9 @@ async def _chat_json(system_prompt: str, user_prompt: str) -> Any:
     attempts per model honoring the server's retry hint, then fail over to
     OPENAI_FALLBACK_MODEL on sustained rate limiting; with pacing disabled
     the LLM_SEMAPHORE burst cap (MAX_CONCURRENT_LLM_REQUESTS) applies instead.
+    The pacing gap is pool-aware (configured interval / rotation-pool size):
+    rotation spreads starts across keys, so each key still sees roughly the
+    configured gap while multi-key setups stop paying the full serial cost.
     Underneath, _do_chat_json rotates across the API_KEYS pool (at most 3
     concurrent rotations via EXTRACTION_SEMAPHORE), retrying rate-limited
     keys on the lighter fallback model before degrading gracefully.
@@ -589,6 +614,11 @@ async def _chat_json(system_prompt: str, user_prompt: str) -> Any:
     global _last_llm_start
     interval = _throttle_interval()
     if interval > 0:
+        # Per-key protection with a shared global lock: divide by the pool
+        # size (round-robin rotation approximates even spread). Single key
+        # setups are unchanged; 3 keys turn a 12s global gap into ~4s.
+        pool_size = max(1, _pool_size())
+        interval = interval / pool_size
         async with EXTRACTION_LOCK:
             now = time.monotonic()
             wait = _last_llm_start + interval - now
@@ -648,6 +678,7 @@ async def extract_study_pico(
     title: str,
     abstract: str,
     serpapi_result: dict | None = None,
+    rich_context: str | None = None,
 ) -> StudyDesign:
     """Extract PICO design fields. Never raises; any failure yields a
     structured fallback design (all fields "Not reported") instead of an
@@ -657,7 +688,8 @@ async def extract_study_pico(
     LLM payload is built via `get_rich_paper_context()` — rich metadata
     (title + publication summary + snippet) plus open-access PDF text —
     so the model can infer PICO details logically from the extended
-    context instead of defaulting to "Not reported".
+    context instead of defaulting to "Not reported". A caller-prefetched
+    `rich_context` cascade payload is reused as-is (no second PDF fetch).
     """
     if not is_llm_configured():
         logger.info("LLM unconfigured; returning fallback StudyDesign")
@@ -665,7 +697,9 @@ async def extract_study_pico(
     try:
         prompt = load_prompt(STUDY_PROMPT_FILE)
         template = str(prompt["user_template"])
-        paper_text = await _build_rich_paper_text(title, abstract, serpapi_result)
+        paper_text = await _build_rich_paper_text(
+            title, abstract, serpapi_result, prebuilt_rich=rich_context
+        )
         # Literal .replace (not .format): template contains {{...}} literals.
         # paper_text is third-party controlled: sanitize delimiter lookalikes
         # so it cannot break out of its <paper_content> span.
@@ -707,14 +741,17 @@ async def extract_pico_from_study(
 ) -> StudyDesign:
     """Strategy 1 + 2 PICO entry point: rich SerpApi context straight to the LLM.
 
-    Passes `serpapi_result` into `get_rich_paper_context()` to construct the
-    high-character payload (title + publication summary + snippet + PDF text)
-    before sending it to the LLM. `title`/`abstract` are used directly when
-    no `serpapi_result` is given (or to fill gaps when the result lacks
-    them). Never raises; failures yield the "Not reported" fallback design.
+    Awaits `get_rich_paper_context(serpapi_result)` first to run the
+    Strategy 2 (PDF) -> Strategy 1 (metadata) cascade, then injects the
+    resulting payload into the `<paper_content>` prompt block via
+    `extract_study_pico` (prefetched, so the PDF is fetched exactly once).
+    `title`/`abstract` are used directly when no `serpapi_result` is given
+    (or to fill gaps when the result lacks them). Never raises; failures
+    yield the "Not reported" fallback design.
     """
     resolved_title = title.strip()
     resolved_abstract = abstract.strip()
+    rich_context: str | None = None
     if serpapi_result is not None and isinstance(serpapi_result, dict):
         resolved_title = resolved_title or str(serpapi_result.get("title") or "").strip()
         if not resolved_abstract:
@@ -722,7 +759,16 @@ async def extract_pico_from_study(
             pub = serpapi_result.get("publication_info") or {}
             summary = str(pub.get("summary") or "").strip() if isinstance(pub, dict) else ""
             resolved_abstract = snippet or summary
-    return await extract_study_pico(resolved_title, resolved_abstract, serpapi_result)
+        try:
+            from app.services.search_serp import get_rich_paper_context
+
+            rich_context = await get_rich_paper_context(serpapi_result)
+        except Exception as exc:  # noqa: BLE001 - cascade failure falls back below
+            logger.warning("Rich paper context failed, using title/abstract: %s", exc)
+            rich_context = None
+    return await extract_study_pico(
+        resolved_title, resolved_abstract, serpapi_result, rich_context=rich_context
+    )
 
 
 def _coerce_claim(item: object, study_id: str, index: int) -> Claim | None:
@@ -865,8 +911,7 @@ GROUNDING_CLAIM_FIELDS_BLOCK = (
     "Never paraphrase this quote.\n"
     "PICO grounding per claim: report population, intervention, control, and "
     "outcome strictly as stated in the text, using 'Unspecified in text' for "
-    "any element the text does not state. "
-    + TITLE_INFERENCE_GUARD
+    "any element the text does not state. " + TITLE_INFERENCE_GUARD
 )
 
 
@@ -942,18 +987,23 @@ async def _extract_study_unified_inner(
     intervention: str = "",
     outcome: str = "",
     serpapi_result: dict | None = None,
-) -> tuple[StudyDesign, list[Claim], bool]:
-    """Unified extraction with explicit fallback provenance flag.
+    anchor_question: str = "",
+) -> tuple[StudyDesign, list[Claim], bool, bool]:
+    """Unified extraction with explicit fallback + auth provenance flags.
 
-    Same behavior as `extract_study_unified`, plus a third return value:
-    True when the result came from a heuristic/blank fallback (LLM
-    unconfigured, contract violation, or quota-exhausted heuristic) instead
-    of the LLM. Callers mark the Study `is_fallback=True` so fallback
-    records are served but never frozen into search_cache.
+    Returns `(design, claims, fallback, auth_failed)`:
+    - `fallback` True when the result came from a heuristic/blank fallback
+      (LLM unconfigured, contract violation, quota-exhausted heuristic, or
+      zero-claim backstop) instead of the LLM. Callers mark the Study
+      `is_fallback=True` so fallback records are served but never frozen
+      into search_cache.
+    - `auth_failed` True when this paper saw a credential rejection (401).
+      Unlike the old process-global counter snapshot, this is per-paper so
+      concurrent searches cannot misattribute another search's failure.
     """
     if not is_llm_configured():
         logger.info("LLM unconfigured; returning fallback design, no claims")
-        return _fallback_design(), [], True
+        return _fallback_design(), [], True, False
     try:
         prompt = load_prompt(UNIFIED_PROMPT_FILE)
         template = str(prompt["user_template"])
@@ -962,6 +1012,15 @@ async def _extract_study_unified_inner(
         # third-party controlled: strip delimiter lookalikes (and cap entity
         # length) so neither can break out of its <user_query>/<paper_content>
         # span and masquerade as trusted instructions.
+        anchor = _sanitize_prompt_span(anchor_question.strip(), 300)
+        if anchor:
+            # Natural question form ("Do men sleep more than women?") reads
+            # better than the templated "Does X increase Y?" form, which is
+            # ungrammatical for group comparisons. The polarity rules below
+            # still resolve verdicts against {intervention}/{outcome}.
+            template = template.replace(
+                "Does {intervention} increase {outcome}?", anchor, 1
+            )
         user = (
             template.replace("{study_id}", study_id)
             .replace(
@@ -988,7 +1047,7 @@ async def _extract_study_unified_inner(
                 study_id,
                 type(data).__name__,
             )
-            return _fallback_design(), [], True
+            return _fallback_design(), [], True, False
         design_data = data.get("design", {})
         if isinstance(design_data, dict):
             design = StudyDesign(
@@ -1005,6 +1064,7 @@ async def _extract_study_unified_inner(
             )
             design = _fallback_design()
         claims_data = data.get("claims", [])
+        used_backstop = False
         if isinstance(claims_data, list):
             claims = [
                 claim
@@ -1015,11 +1075,13 @@ async def _extract_study_unified_inner(
                 # Valid LLM response but nothing usable: backstop with one
                 # honest unclear claim so this paper still contributes a
                 # snippet-grounded conclusion instead of vanishing.
+                # Flagged as fallback so it is served but never cached.
                 logger.info(
                     "Unified extraction returned no usable claims for %s; using backstop",
                     study_id,
                 )
                 claims = _backstop_claim(title, abstract, study_id)
+                used_backstop = True
         else:
             logger.warning(
                 "Unified 'claims' for %s was %s; using no claims",
@@ -1027,18 +1089,25 @@ async def _extract_study_unified_inner(
                 type(claims_data).__name__,
             )
             claims = []
-        return design, claims, False
+        return design, claims, used_backstop, False
     except Exception as exc:  # noqa: BLE001 - extraction must never break search
         logger.warning("Unified extraction failed for %s: %s", study_id, exc)
-        if _is_rate_limit_error(exc):
-            # Quota survived retries + failover: squeeze signal from metadata
-            # with zero further API cost instead of saving a blank record.
-            logger.info("Rate-limited; title/snippet heuristic fallback for %s", study_id)
+        if _is_auth_error(exc):
+            # Credential rejection survived rotation over every pool key.
+            logger.warning("LLM auth failed for %s; heuristic fallback", study_id)
             design, claims = extract_study_fallback(
                 title, abstract, study_id, intervention, outcome
             )
-            return design, claims, True
-        return _fallback_design(), [], True
+            return design, claims, True, True
+        if _is_retryable_llm_error(exc):
+            # Quota/overload survived retries + failover: squeeze signal from
+            # metadata with zero further API cost instead of a blank record.
+            logger.info("LLM unavailable; title/snippet heuristic fallback for %s", study_id)
+            design, claims = extract_study_fallback(
+                title, abstract, study_id, intervention, outcome
+            )
+            return design, claims, True, False
+        return _fallback_design(), [], True, False
 
 
 async def extract_study_unified(
@@ -1048,6 +1117,7 @@ async def extract_study_unified(
     intervention: str = "",
     outcome: str = "",
     serpapi_result: dict | None = None,
+    anchor_question: str = "",
 ) -> tuple[StudyDesign, list[Claim]]:
     """Extract PICO design + claims in a SINGLE LLM call. Never raises.
 
@@ -1063,8 +1133,8 @@ async def extract_study_unified(
     `get_rich_paper_context()` (rich metadata + PDF text) so PICO fields can
     be inferred logically from the extended context.
     """
-    design, claims, _ = await _extract_study_unified_inner(
-        title, abstract, study_id, intervention, outcome, serpapi_result
+    design, claims, _fallback, _auth = await _extract_study_unified_inner(
+        title, abstract, study_id, intervention, outcome, serpapi_result, anchor_question
     )
     return design, claims
 

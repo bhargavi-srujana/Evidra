@@ -6,8 +6,9 @@ import type {
   Study,
 } from "./types";
 
-const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000/api/v1";
+const API_BASE_URL = (
+  process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000/api/v1"
+).replace(/\/+$/, "");
 
 /** Backend accepts up to 20 study IDs per compare request. */
 const MAX_COMPARE_IDS = 20;
@@ -16,17 +17,32 @@ const MAX_COMPARE_IDS = 20;
 const REQUEST_TIMEOUT_MS = 45_000;
 
 /**
- * Search + compare fan out to one paced LLM call per paper, so a
- * multi-paper corpus legitimately takes a while. Per-request timeouts
- * default to 45s to accommodate multi-paper LLM extraction.
+ * Search + compare fan out to paced LLM calls (one per paper, seconds
+ * apart), so a multi-paper corpus legitimately takes minutes — far beyond
+ * the snappy per-request default above. The search/compare entry points use
+ * this long budget; single-shot fetches use REQUEST_TIMEOUT_MS.
  */
-const LONG_REQUEST_TIMEOUT_MS = 45_000;
+const LONG_REQUEST_TIMEOUT_MS = 300_000;
 
 /** Short client cache so back/forward + re-searches skip the network. */
 const CACHE_TTL_MS = 60_000;
+const CACHE_MAX_ENTRIES = 100;
 const responseCache = new Map<string, { expires: number; data: unknown }>();
 /** Coalesce concurrent identical requests into one fetch. */
 const inflight = new Map<string, Promise<unknown>>();
+
+function cacheSet(key: string, data: unknown): void {
+  if (responseCache.size >= CACHE_MAX_ENTRIES) {
+    // Evict oldest first (Maps preserve insertion order).
+    const oldest = responseCache.keys().next().value;
+    if (oldest !== undefined) responseCache.delete(oldest);
+  }
+  responseCache.set(key, { expires: Date.now() + CACHE_TTL_MS, data });
+}
+
+function normalizeQueryKey(query: string): string {
+  return query.trim().toLowerCase().replace(/\s+/g, " ").slice(0, 2000);
+}
 
 /** Friendly message surfaced when our own per-request timeout fires. */
 const TIMEOUT_MESSAGE = "Search request timed out. Please try again.";
@@ -138,16 +154,16 @@ async function fetchJson<T>(
       });
       const data = await handleResponse<T>(res);
       if (cacheKey) {
-        responseCache.set(cacheKey, {
-          expires: Date.now() + CACHE_TTL_MS,
-          data,
-        });
+        cacheSet(cacheKey, data);
       }
       return data;
     } catch (err) {
-      // Our own timeout fired — translate Chrome's cryptic
-      // "signal is aborted without reason" into a friendly message.
-      if (timedOut() && isAbortError(err)) {
+      // Our own timeout fired — translate it into a friendly message.
+      // NOTE: per the Fetch spec, fetch rejects with signal.reason (our
+      // plain Error, name "Error"), NOT necessarily a DOMException
+      // AbortError, so the timedOut() flag — set only by our own timer —
+      // is the reliable signal, not the error name.
+      if (timedOut()) {
         throw new Error(TIMEOUT_MESSAGE);
       }
       throw err;
@@ -193,6 +209,8 @@ async function handleResponse<T>(res: Response): Promise<T> {
     } catch {
       // Non-JSON body: use as-is.
     }
+    // Truncate backend internals: single line, max 300 chars for display.
+    detail = detail.split("\n")[0].trim().slice(0, 300) || res.statusText;
     throw new Error(`API error ${res.status}: ${detail}`);
   }
   return (await res.json()) as T;
@@ -214,7 +232,7 @@ export async function searchQuestion(
       body: JSON.stringify({ query, max_results: maxResults }),
       signal: init?.signal,
     },
-    `search:${query}:${maxResults}`,
+    `search:${normalizeQueryKey(query)}:${maxResults}`,
     LONG_REQUEST_TIMEOUT_MS,
   );
 }
@@ -234,6 +252,46 @@ export async function getStudy(
 }
 
 /**
+ * Fingerprint claim content for cache keys: IDs + directions + texts, so two
+ * corpora that share study IDs but differ in findings never share a 60s
+ * cache entry. 53-bit hash (cyrb53): accidental collisions are negligible
+ * for a 60s client-side cache.
+ */
+function hashText(text: string): string {
+  let h1 = 0xdeadbeef;
+  let h2 = 0x41c6ce57;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
+  }
+  h1 =
+    Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^
+    Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 =
+    Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^
+    Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36);
+}
+
+/** Order-insensitive JSON used as hash input for cache keys. */
+function stableFingerprint(parts: string[]): string {
+  return hashText(parts.slice().sort().join("\n"));
+}
+
+function hashClaims(claims: Claim[]): string {
+  return stableFingerprint(
+    claims.map((c) => `${c.claim_id}:${c.effect_direction}:${c.text}`),
+  );
+}
+
+function hashStudies(studies: Study[]): string {
+  return stableFingerprint(
+    studies.map((s) => `${s.study_id}:${s.title}:${s.abstract}`),
+  );
+}
+
+/**
  * POST /api/v1/compare — methodology-aware contradiction analysis.
  *
  * Pass the `study_ids` from search plus the extracted `claims` so the
@@ -243,7 +301,7 @@ export async function getStudy(
 export async function compareStudies(
   studyIds: string[],
   claims?: Claim[],
-  init?: { signal?: AbortSignal },
+  init?: { signal?: AbortSignal; studies?: Study[] },
 ): Promise<ComparisonMatrix> {
   const sorted = [...studyIds].sort();
   return fetchJson<ComparisonMatrix>(
@@ -252,12 +310,18 @@ export async function compareStudies(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(
-        claims ? { study_ids: studyIds, claims } : { study_ids: studyIds },
+        init?.studies
+          ? { study_ids: studyIds, claims, studies: init.studies }
+          : claims
+            ? { study_ids: studyIds, claims }
+            : { study_ids: studyIds },
       ),
       signal: init?.signal,
     },
-    // Claims payloads vary per search; key on IDs + claim count to stay safe.
-    `compare:${sorted.join(",")}:${claims?.length ?? "stored"}`,
+    // Key on IDs + content hashes: same IDs with different findings or
+    // study records (or an omitted-claims store read) must never share an
+    // entry. Supplied studies also let /compare succeed when Mongo is down.
+    `compare:${sorted.join(",")}:${claims ? hashClaims(claims) : "stored"}:${init?.studies ? hashStudies(init.studies) : "stored"}`,
     LONG_REQUEST_TIMEOUT_MS,
   );
 }
@@ -325,6 +389,10 @@ export async function searchAndCompare(
   try {
     const comparison = await compareStudies(ids, search.claims, {
       signal: compareController.signal,
+      // Ship the studies too: /compare resolves them from Mongo otherwise,
+      // which fails the whole comparison on a store outage right after a
+      // successful search.
+      studies: search.results,
     });
     return { search, comparison };
   } catch (err) {

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import type { FormEvent } from "react";
 import { Search, Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -18,13 +18,10 @@ export default function QueryBar({
   onSearch,
   className,
 }: QueryBarProps) {
+  // State initializes from initialQuery on mount. Parents navigating
+  // query-to-query pass key={query} so the header remounts instead of
+  // showing a stale input — no sync effect needed.
   const [query, setQuery] = useState(initialQuery);
-
-  // Results page navigates query-to-query without remounting the header,
-  // so reflect the new question instead of showing a stale input.
-  useEffect(() => {
-    setQuery(initialQuery);
-  }, [initialQuery]);
 
   const handleSubmit = (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -39,7 +36,7 @@ export default function QueryBar({
       role="search"
       className={cn("w-full", className)}
     >
-      <div className="flex w-full items-center gap-2 rounded-2xl border border-zinc-200 bg-white p-2 shadow-sm focus-within:border-zinc-400 focus-within:ring-2 focus-within:ring-zinc-100 dark:border-zinc-800 dark:bg-zinc-950">
+      <div className="flex w-full items-center gap-2 rounded-2xl border border-zinc-200 bg-white p-2 shadow-sm focus-within:border-zinc-900 focus-within:ring-2 focus-within:ring-zinc-900/20 dark:border-zinc-800 dark:bg-zinc-950 dark:focus-within:border-zinc-100 dark:focus-within:ring-zinc-100/20">
         <Search
           className="ml-2 h-5 w-5 shrink-0 text-zinc-400"
           aria-hidden="true"

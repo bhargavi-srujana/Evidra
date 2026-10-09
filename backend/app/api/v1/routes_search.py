@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
@@ -39,7 +39,7 @@ from app.services.extraction import (
     _fallback_design,
     make_study_id,
 )
-from app.services.query_parser import parse_query
+from app.services.query_parser import aparse_query
 from app.services.search_s2 import search_semantic_scholar
 from app.services.search_serp import is_serpapi_configured, search_google_scholar
 
@@ -59,7 +59,7 @@ SEARCH_CACHE_TTL_SECONDS = 7 * 24 * 3600  # 7 days
 class SearchRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    query: str = Field(min_length=1)
+    query: str = Field(min_length=1, max_length=2000)
     max_results: int = Field(default=6, ge=1, le=50)
 
 
@@ -69,6 +69,14 @@ class SearchResponse(BaseModel):
     query: str
     results: list[Study]
     claims: list[Claim] = Field(default_factory=list)
+    # Anchor provenance: how effect directions in `claims` are to be read.
+    # "Positive" means the intervention below raises the outcome; opposite
+    # phrasings ("do men…" vs "do women…") anchor opposite verdicts by
+    # design, so the UI surfaces this to avoid misreading mirrored counts.
+    intervention: str = ""
+    outcome: str = ""
+    expected_direction: str = "unclear"
+    anchor_question: str = ""
 
 
 def _needs_enrichment(papers: list[RawPaper]) -> bool:
@@ -77,23 +85,40 @@ def _needs_enrichment(papers: list[RawPaper]) -> bool:
 
 
 def _dedupe_papers(papers: list[RawPaper]) -> list[RawPaper]:
-    seen: set[str] = set()
+    seen_titles: set[str] = set()
+    seen_dois: set[str] = set()
     unique: list[RawPaper] = []
     for paper in papers:
+        doi_key = (paper.doi or "").strip().lower().rstrip(".,;")
+        if doi_key:
+            if doi_key in seen_dois:
+                continue
+            seen_dois.add(doi_key)
         key = normalize_title(paper.title)
-        if key and key not in seen:
-            seen.add(key)
-            unique.append(paper)
+        if not key:
+            continue
+        if key in seen_titles:
+            continue
+        seen_titles.add(key)
+        unique.append(paper)
     return unique
 
 
 def _merge_papers(primary: list[RawPaper], fallback: list[RawPaper], limit: int) -> list[RawPaper]:
     """Backfill missing SerpApi abstracts from S2, then top up with S2-only hits."""
-    by_title = {normalize_title(p.title): p for p in primary}
+    by_title = {normalize_title(p.title): p for p in primary if normalize_title(p.title)}
+    by_doi = {
+        (p.doi or "").strip().lower().rstrip(".,;"): p
+        for p in primary
+        if (p.doi or "").strip()
+    }
     extras: list[RawPaper] = []
     for paper in fallback:
         key = normalize_title(paper.title)
-        existing = by_title.get(key)
+        doi_key = (paper.doi or "").strip().lower().rstrip(".,;")
+        existing = by_title.get(key) if key else None
+        if existing is None and doi_key:
+            existing = by_doi.get(doi_key)
         if existing is not None:
             if existing.abstract_missing() and not paper.abstract_missing():
                 existing.snippet = paper.snippet
@@ -123,11 +148,33 @@ def _make_study_id(
     return make_study_id(title, year, doi)
 
 
-def _search_cache_key(neutral_query: str) -> str:
-    """Stable cache key: normalized neutral query, case/whitespace-insensitive."""
+def _search_cache_key(
+    neutral_query: str,
+    intervention: str = "",
+    outcome: str = "",
+    direction: str = "unclear",
+    max_results: int = 6,
+) -> str:
+    """Stable cache key: normalized neutral query, case/whitespace-insensitive.
+
+    Versioned (`search-v4-…`): the key scopes on polarity (intervention /
+    outcome / expected direction) and on max_results — opposite questions
+    must never share a response, and a response cached at a small limit must
+    never satisfy a later request for more studies (entries only slice down,
+    never expand). Pre-v4 entries never hit.
+    """
     normalized = " ".join((neutral_query or "").strip().lower().split())
-    digest = hashlib.sha1(normalized.encode()).hexdigest()
-    return f"search-{digest[:16]}"
+    scope = "|".join(
+        [
+            normalized,
+            " ".join((intervention or "").strip().lower().split()),
+            " ".join((outcome or "").strip().lower().split()),
+            (direction or "unclear").strip().lower(),
+            str(max(1, int(max_results))),
+        ]
+    )
+    digest = hashlib.sha1(scope.encode()).hexdigest()
+    return f"search-v4-{digest[:16]}"
 
 
 # Minimum claim confidence that counts as cacheable signal. Heuristic
@@ -234,7 +281,22 @@ def _coerce_cached_response(doc: dict, query: str, max_results: int) -> SearchRe
     studies = studies[:max_results]
     keep_ids = {study.study_id for study in studies}
     claims = [claim for claim in claims if claim.study_id in keep_ids]
-    return SearchResponse(query=query, results=studies, claims=claims)
+    # Self-healing: entries written before the empty-claim backstop may leave
+    # retained studies with zero claims (papers with no visible conclusion).
+    # Treat as a miss so the query re-extracts fresh instead of serving the
+    # degraded response.
+    claimed_ids = {claim.study_id for claim in claims}
+    if any(study.study_id not in claimed_ids for study in studies):
+        return None
+    return SearchResponse(
+        query=query,
+        results=studies,
+        claims=claims,
+        intervention=str(doc.get("intervention", "") or ""),
+        outcome=str(doc.get("outcome", "") or ""),
+        expected_direction=str(doc.get("expected_direction", "") or "unclear"),
+        anchor_question=str(doc.get("anchor_question", "") or ""),
+    )
 
 
 async def _cache_lookup(key: str) -> dict | None:
@@ -249,27 +311,38 @@ async def _cache_lookup(key: str) -> dict | None:
     created = doc.get("created_at")
     if created is not None:
         if created.tzinfo is None:
-            created = created.replace(tzinfo=timezone.utc)
-        age = (datetime.now(timezone.utc) - created).total_seconds()
+            created = created.replace(tzinfo=UTC)
+        age = (datetime.now(UTC) - created).total_seconds()
         if age > SEARCH_CACHE_TTL_SECONDS:
             try:
                 await get_db()[SEARCH_CACHE_COLLECTION].delete_one({"key": key})
-            except Exception:  # noqa: BLE001 - best-effort eviction
-                pass
+            except Exception as exc:  # noqa: BLE001 - best-effort eviction
+                logger.debug("Search cache eviction skipped for %s: %s", key, exc)
             return None
     return doc
 
 
-async def _cache_store(key: str, neutral_query: str, response: SearchResponse) -> None:
+async def _cache_store(
+    key: str,
+    neutral_query: str,
+    response: SearchResponse,
+    parsed=None,  # type: ignore[no-untyped-def]
+) -> None:
     """Persist the aggregated response; logs and swallows all errors."""
     try:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         doc = {
             "key": key,
             "neutral_query": neutral_query,
             "query": response.query,
             "results": [study.model_dump() for study in response.results],
             "claims": [claim.model_dump() for claim in response.claims],
+            "intervention": response.intervention or (parsed.intervention if parsed else ""),
+            "outcome": response.outcome or (parsed.outcome if parsed else ""),
+            "expected_direction": response.expected_direction
+            or (parsed.expected_direction if parsed else "unclear"),
+            "anchor_question": response.anchor_question
+            or (parsed.anchor_question if parsed else ""),
             "created_at": now,
             "updated_at": now,
         }
@@ -308,36 +381,48 @@ async def _extract_one(
     semaphore: asyncio.Semaphore,
     intervention: str = "",
     outcome: str = "",
-) -> tuple[Study, list[Claim]]:
+    anchor_question: str = "",
+) -> tuple[Study, list[Claim], bool]:
     """Extract PICO + claims for one paper in a SINGLE LLM call.
 
-    Never raises (structured fallbacks on error). Studies fan out via
-    asyncio.gather bounded by the semaphore; individual LLM requests are
-    further paced/retried inside the extraction service. The normalized
-    intervention/outcome anchor direction polarity in the prompt. Study IDs
-    are stable (DOI else title+year — no positional index), and heuristic
-    fallback results are flagged `is_fallback=True` so they are served but
-    never cached.
+    Never raises (structured fallbacks on error). Returns
+    `(study, claims, auth_failed)` where `auth_failed` is True only when
+    this paper saw a credential rejection — per-paper provenance so
+    concurrent searches cannot misattribute each other's failures.
+    Study IDs are stable (DOI else title+year), and heuristic fallback
+    results are flagged `is_fallback=True` so they are served but never
+    cached.
     """
     async with semaphore:
         study_id = _make_study_id(paper.title, paper.year, paper.doi)
         try:
-            design, claims, fallback = await _extract_study_unified_inner(
-                paper.title, paper.snippet, study_id, intervention, outcome
+            result = await _extract_study_unified_inner(
+                paper.title,
+                paper.snippet,
+                study_id,
+                intervention,
+                outcome,
+                anchor_question=anchor_question,
             )
+            if len(result) == 4:
+                design, claims, fallback, auth_failed = result
+            else:  # backward-compat with 3-tuple during rollout
+                design, claims, fallback = result  # type: ignore[misc]
+                auth_failed = False
         except Exception as exc:  # noqa: BLE001 - per-paper resilience
             logger.warning("Unified extraction failed for %s: %s", study_id, exc)
             design, claims, fallback = _fallback_design(), [], True
+            auth_failed = extraction_svc._is_auth_error(exc)
         if not extraction_svc.is_llm_configured():
             fallback = True
-        return _build_study(paper, design, study_id, is_fallback=fallback), claims
+        return _build_study(paper, design, study_id, is_fallback=fallback), claims, auth_failed
 
 
 async def _persist_studies_and_claims(studies: list[Study], claims: list[Claim]) -> None:
     """Best-effort Mongo upserts; logs and swallows all errors."""
     try:
         db = get_db()
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         for study in studies:
             doc = study.model_dump()
             doc["updated_at"] = now
@@ -378,29 +463,40 @@ async def _retrieve_papers(query: str, max_results: int) -> list[RawPaper]:
     return _dedupe_papers(papers)[:max_results]
 
 
-@router.post("/search", response_model=SearchResponse)
-@limiter.limit("20/minute")
-async def search_studies(request: Request, payload: SearchRequest) -> SearchResponse:
-    """Live search: normalize -> retrieve -> concurrent extraction -> persist -> return."""
-    parsed = parse_query(payload.query)
-    logger.info(
-        "Normalized query: neutral=%r intervention=%r outcome=%r direction=%s",
-        parsed.neutral_search_query,
-        parsed.intervention,
-        parsed.outcome,
-        parsed.expected_direction,
-    )
-    neutral = parsed.neutral_search_query or payload.query
-    cache_key = _search_cache_key(neutral)
-    cached_doc = await _cache_lookup(cache_key)
-    if cached_doc is not None:
-        cached = _coerce_cached_response(cached_doc, payload.query, payload.max_results)
-        if cached is not None:
-            logger.info("Search cache hit for %r", neutral)
-            return cached
-        logger.info("Ignoring invalid cache entry for %r", neutral)
+# Singleflight: concurrent identical queries share one pipeline run instead
+# of each paying full retrieval + LLM extraction (stampede / quota burn).
+# Waiters shield-await the same task; cancelling a waiter never cancels the
+# shared run. Entries are popped when the run settles.
+_inflight_searches: dict[str, asyncio.Task[SearchResponse]] = {}
 
-    papers = await _retrieve_papers(neutral, payload.max_results)
+
+async def _run_singleflight(key: str, factory) -> SearchResponse:  # type: ignore[no-untyped-def]
+    try:
+        return await factory()
+    finally:
+        if _inflight_searches.get(key) is asyncio.current_task():
+            _inflight_searches.pop(key, None)
+
+
+async def _search_fresh(
+    payload: SearchRequest, neutral: str, cache_key: str, parsed
+) -> SearchResponse:  # type: ignore[no-untyped-def]
+    """Cache-miss path: retrieve -> concurrent extraction -> persist -> store."""
+    try:
+        papers = await _retrieve_papers(neutral, payload.max_results)
+    except HTTPException:
+        raise
+    except SearchProviderError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Literature providers unavailable: {exc}",
+        ) from exc
+    except Exception as exc:
+        logger.warning("Literature retrieval failed for %r: %s", neutral, exc)
+        raise HTTPException(
+            status_code=502,
+            detail="Literature search failed unexpectedly.",
+        ) from exc
     if not papers:
         raise HTTPException(
             status_code=502,
@@ -410,42 +506,102 @@ async def search_studies(request: Request, payload: SearchRequest) -> SearchResp
             ),
         )
 
-    semaphore = asyncio.Semaphore(4)
-    auth_failures_before = extraction_svc.AUTH_FAILURE_COUNT
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT_EXTRACTIONS)
     # Parallel extraction: all papers in the payload are fetched and parsed
     # concurrently via extract_study_unified (bounded by the semaphore to
     # avoid tripping provider rate limits).
     tasks = [
-        _extract_one(paper, semaphore, parsed.intervention, parsed.outcome)
+        _extract_one(
+            paper, semaphore, parsed.intervention, parsed.outcome, parsed.anchor_question
+        )
         for paper in papers
     ]
     processed = await asyncio.gather(*tasks)
-    studies = [study for study, _ in processed]
-    claims = [claim for _, paper_claims in processed for claim in paper_claims]
+    studies = [study for study, _, _ in processed]
+    claims = [claim for _, paper_claims, _ in processed for claim in paper_claims]
+    auth_failed = any(flag for _, _, flag in processed)
 
-    if (
-        extraction_svc.AUTH_FAILURE_COUNT > auth_failures_before
-        and not _is_cacheable(studies, claims)
-    ):
-        # The provider rejected our credentials: every extraction fell back to
-        # hollow records. Say so loudly (with the fix) instead of serving 10
-        # empty "Not reported" cards with HTTP 200.
-        raise HTTPException(
-            status_code=502,
-            detail=(
-                "LLM authentication failed: the provider rejected the configured "
-                "API key (401 Invalid API Key), so no study could be analyzed. "
-                "Check GROQ_API_KEYS / GROQ_API_KEY / OPENAI_API_KEY in "
-                "backend/.env (Groq keys start with gsk_ and are short — "
-                "re-paste a fresh key from console.groq.com), then restart "
-                "the backend."
-            ),
-        )
+    if not _is_cacheable(studies, claims):
+        if auth_failed:
+            # The provider rejected our credentials on this run: every
+            # extraction fell back to hollow records. Say so loudly (with the
+            # fix) instead of serving empty "Not reported" cards with 200.
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "LLM authentication failed: the provider rejected the configured "
+                    "API key (401 Invalid API Key), so no study could be analyzed. "
+                    "Check GROQ_API_KEYS / GROQ_API_KEY / OPENAI_API_KEY in "
+                    "backend/.env (Groq keys start with gsk_ and are short — "
+                    "re-paste a fresh key from console.groq.com), then restart "
+                    "the backend."
+                ),
+            )
+        if not extraction_svc.is_llm_configured():
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "LLM is not configured (no API key), so studies could not be "
+                    "analyzed. Set GROQ_API_KEYS / GROQ_API_KEY / OPENAI_API_KEY "
+                    "in backend/.env and restart the backend."
+                ),
+            )
 
-    response = SearchResponse(query=payload.query, results=studies, claims=claims)
+    response = SearchResponse(
+        query=payload.query,
+        results=studies,
+        claims=claims,
+        intervention=parsed.intervention,
+        outcome=parsed.outcome,
+        expected_direction=parsed.expected_direction,
+        anchor_question=parsed.anchor_question,
+    )
     await _persist_studies_and_claims(studies, claims)
     if _is_cacheable(studies, claims):
-        await _cache_store(cache_key, neutral, response)
+        await _cache_store(cache_key, neutral, response, parsed)
     else:
         logger.info("Skipping cache store for %r (no extraction signal)", neutral)
     return response
+
+
+@router.post("/search", response_model=SearchResponse)
+@limiter.limit("20/minute")
+async def search_studies(request: Request, payload: SearchRequest) -> SearchResponse:
+    """Live search: normalize -> cache -> coalesced fresh run -> return."""
+    # Async parse: rule shapes cost zero quota; missed shapes spend one
+    # cached LLM call (flag-gated) so extraction anchors instead of drifting.
+    parsed = await aparse_query(payload.query)
+    logger.info(
+        "Normalized query: neutral=%r intervention=%r outcome=%r direction=%s",
+        parsed.neutral_search_query,
+        parsed.intervention,
+        parsed.outcome,
+        parsed.expected_direction,
+    )
+    neutral = parsed.neutral_search_query or payload.query
+    cache_key = _search_cache_key(
+        neutral,
+        parsed.intervention,
+        parsed.outcome,
+        parsed.expected_direction,
+        payload.max_results,
+    )
+    cached_doc = await _cache_lookup(cache_key)
+    if cached_doc is not None:
+        cached = _coerce_cached_response(cached_doc, payload.query, payload.max_results)
+        if cached is not None:
+            logger.info("Search cache hit for %r", neutral)
+            return cached
+        logger.info("Ignoring invalid cache entry for %r", neutral)
+
+    task = _inflight_searches.get(cache_key)
+    if task is None:
+        task = asyncio.ensure_future(
+            _run_singleflight(cache_key, lambda: _search_fresh(payload, neutral, cache_key, parsed))
+        )
+        _inflight_searches[cache_key] = task
+    else:
+        logger.info("Coalescing concurrent search for %r", neutral)
+    # Shield the shared run: a single waiter's disconnect must not cancel
+    # extraction for the other coalesced callers.
+    return await asyncio.shield(task)

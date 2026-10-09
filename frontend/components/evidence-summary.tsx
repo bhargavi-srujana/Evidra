@@ -46,6 +46,7 @@ export default function EvidenceSummaryPanel({
   const yearData = useMemo(() => {
     const counts = new Map<number, number>();
     for (const study of studies) {
+      if (typeof study.year !== "number") continue;
       counts.set(study.year, (counts.get(study.year) ?? 0) + 1);
     }
     return [...counts.entries()]

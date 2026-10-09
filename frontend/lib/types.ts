@@ -27,12 +27,13 @@ export interface Study {
   study_id: string;
   title: string;
   authors: Author[];
-  year: number;
+  year: number | null;
   venue: string | null;
   doi: string | null;
   abstract: string;
   url: string | null;
   design: StudyDesign;
+  is_fallback?: boolean;
 }
 
 export type EffectDirection =
@@ -108,11 +109,17 @@ export interface SearchResponse {
   query: string;
   results: Study[];
   claims: Claim[];
+  /** Anchor provenance: "Positive" means `intervention` raises `outcome`. */
+  intervention?: string;
+  outcome?: string;
+  expected_direction?: string;
+  anchor_question?: string;
 }
 
 export interface CompareRequest {
   study_ids: string[];
   claims?: Claim[];
+  studies?: Study[];
 }
 
 export type CompareResponse = ComparisonMatrix;

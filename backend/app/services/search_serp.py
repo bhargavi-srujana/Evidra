@@ -35,35 +35,71 @@ PDF_MAX_CHARS = 4000
 # exhaust server memory. Enforced while streaming (plus Content-Length check).
 PDF_MAX_BYTES = 10_000_000
 
-# SSRF blocklist: loopback, RFC-1918 private ranges, and cloud metadata IP.
+# SSRF blocklist: IPv4 loopback, all RFC-1918 private ranges, "this host",
+# cloud metadata surface — plus the IPv6 equivalents (loopback, link-local,
+# unique-local).
 _BLOCKED_NETWORKS = (
     ipaddress.ip_network("127.0.0.0/8"),
     ipaddress.ip_network("10.0.0.0/8"),
     ipaddress.ip_network("172.16.0.0/12"),
     ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("169.254.0.0/16"),
     ipaddress.ip_network("169.254.169.254/32"),
+    ipaddress.ip_network("100.100.100.200/32"),
+    ipaddress.ip_network("0.0.0.0/8"),
+    ipaddress.ip_network("::1/128"),
+    ipaddress.ip_network("fe80::/10"),
+    ipaddress.ip_network("fc00::/7"),
 )
 
+_ALLOWED_PORTS = frozenset({80, 443})
+
 _MAX_REDIRECTS = 3
+
+
+def _check_resolved_ip(host: str, ip_str: str) -> None:
+    """Raise ValueError when a resolved IP falls in a blocked range."""
+    try:
+        resolved_ip = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return
+    for net in _BLOCKED_NETWORKS:
+        if resolved_ip.version == net.version and resolved_ip in net:
+            raise ValueError(
+                f"Blocked host {host!r} resolves to {resolved_ip} in range {net}"
+            )
 
 
 def validate_url_safety(url: str) -> None:
     """Reject non-http(s) URLs and URLs resolving to private/loopback IPs.
 
+    Also rejects embedded credentials (userinfo) and non-web ports so
+    `http://host:22/...` port-scan oracles and credential forwarding are
+    impossible. Hostnames are DNS-resolved and every result checked
+    (fail closed).
+
     Raises:
         ValueError: if the scheme is not http/https, the URL has no
-            hostname, DNS resolution fails, or any resolved IP falls
-            within a blocked range (127/8, 10/8, 172.16/12, 192.168/16,
-            or 169.254.169.254).
+            hostname, carries userinfo, uses a non-80/443 port, DNS
+            resolution fails, or any resolved IP falls within a blocked
+            range.
     """
     if not isinstance(url, str) or not url.strip():
         raise ValueError("URL must be a non-empty string")
     parsed = urlparse(url.strip())
     if parsed.scheme.lower() not in ("http", "https"):
         raise ValueError(f"Blocked non-http(s) scheme: {parsed.scheme!r}")
+    if parsed.username or parsed.password:
+        raise ValueError("Blocked URL with embedded credentials")
     host = parsed.hostname
     if not host:
         raise ValueError("URL has no hostname")
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError(f"Invalid port in URL: {exc}") from exc
+    if port is not None and port not in _ALLOWED_PORTS:
+        raise ValueError(f"Blocked non-web port: {port}")
 
     # Fast path: literal IP in the URL (handles brackets already stripped
     # by urlparse.hostname).
@@ -78,6 +114,8 @@ def validate_url_safety(url: str) -> None:
         return
 
     # Resolve hostnames to IPs and check every result (fail closed).
+    # NOTE: sync DNS here; the async fetch path uses
+    # `validate_url_safety_async` (executor) to avoid blocking the loop.
     try:
         addr_infos = socket.getaddrinfo(host, None)
     except socket.gaierror as exc:
@@ -88,15 +126,17 @@ def validate_url_safety(url: str) -> None:
         sockaddr = info[4]
         if not sockaddr:
             continue
-        try:
-            resolved_ip = ipaddress.ip_address(sockaddr[0])
-        except ValueError:
-            continue
-        for net in _BLOCKED_NETWORKS:
-            if resolved_ip.version == net.version and resolved_ip in net:
-                raise ValueError(
-                    f"Blocked host {host!r} resolves to {resolved_ip} in range {net}"
-                )
+        _check_resolved_ip(host, sockaddr[0])
+
+
+async def validate_url_safety_async(url: str) -> None:
+    """Async wrapper: DNS resolution runs in a thread, never blocking the loop."""
+    import asyncio as _asyncio
+
+    def _validate() -> None:
+        validate_url_safety(url)
+
+    await _asyncio.to_thread(_validate)
 
 _YEAR_RE = re.compile(r"\b(18\d{2}|19\d{2}|20\d{2}|2100)\b")
 _DOI_RE = re.compile(r"10\.\d{4,9}/[^\s\"'<>)\]]+", re.IGNORECASE)
@@ -187,14 +227,14 @@ async def fetch_pdf_text_from_link(pdf_url: str, max_pages: int = 2) -> str:
         return ""
     url = pdf_url.strip()
     try:
-        validate_url_safety(url)
+        await validate_url_safety_async(url)
     except ValueError as exc:
         logger.warning("Blocked unsafe PDF URL %r: %s", url[:80], exc)
         return ""
     max_pages = max(1, int(max_pages))
     try:
         async with httpx.AsyncClient(
-            follow_redirects=False, timeout=3.0
+            timeout=3.0, follow_redirects=False
         ) as client:
             # Manual redirect chain so every hop is SSRF-validated.
             redirects_followed = 0
@@ -216,7 +256,7 @@ async def fetch_pdf_text_from_link(pdf_url: str, max_pages: int = 2) -> str:
                             else httpx.URL(url).join(location).__str__()
                         )
                         try:
-                            validate_url_safety(next_url)
+                            await validate_url_safety_async(next_url)
                         except ValueError as exc:
                             logger.warning(
                                 "Blocked unsafe PDF redirect %r -> %r: %s",
@@ -241,6 +281,13 @@ async def fetch_pdf_text_from_link(pdf_url: str, max_pages: int = 2) -> str:
                     # to GET, whose content-type is verified below.
                     break
 
+            # Re-validate immediately before GET to narrow the DNS-rebinding
+            # (TOCTOU) window between the initial check and connection.
+            try:
+                await validate_url_safety_async(url)
+            except ValueError as exc:
+                logger.warning("Blocked PDF URL on revalidation %r: %s", url[:80], exc)
+                return ""
             # Stream the GET body so a huge file can never fill memory.
             content = bytearray()
             try:
@@ -306,14 +353,15 @@ async def fetch_pdf_text_from_link(pdf_url: str, max_pages: int = 2) -> str:
             for page in doc[:max_pages]:
                 try:
                     chunks.append(page.get_text() or "")
-                except Exception:  # noqa: BLE001 - one bad page must not fail all
+                except Exception as exc:  # noqa: BLE001 - one bad page must not fail all
+                    logger.debug("Skipping unreadable PDF page for %r: %s", url[:80], exc)
                     continue
             text = "\n".join(chunk.strip() for chunk in chunks if chunk.strip()).strip()
         finally:
             try:
                 doc.close()
-            except Exception:  # noqa: BLE001 - best-effort cleanup
-                pass
+            except Exception as exc:  # noqa: BLE001 - best-effort cleanup
+                logger.debug("PDF doc close failed for %r: %s", url[:80], exc)
         return text[:PDF_MAX_CHARS]
     except Exception as exc:  # noqa: BLE001 - PDF enrichment must never break search
         logger.warning("PDF fetch failed for %r: %s", url[:80], exc)
@@ -326,8 +374,10 @@ async def get_rich_paper_context(serpapi_result: dict) -> str:
     Strategy 1 (rich metadata): combines title + `publication_info.summary` +
     snippet into one context block. Strategy 2 (open-access PDF parsing):
     when `resources` contains a PDF link, fetches its first-2-pages text via
-    `fetch_pdf_text_from_link` and appends it to the metadata context.
-    Never raises; without a PDF link the metadata block alone is returned.
+    `fetch_pdf_text_from_link` and returns
+    `f"{metadata_context}\\n\\n[Full-Text Extract from PDF]:\\n{pdf_text}"`.
+    Never raises; without a PDF link (or when the fetch times out / fails)
+    the metadata block alone is returned.
     """
     if not isinstance(serpapi_result, dict):
         return ""
@@ -343,14 +393,14 @@ async def get_rich_paper_context(serpapi_result: dict) -> str:
         parts.append(f"Summary: {summary}")
     if snippet:
         parts.append(f"Snippet: {snippet}")
-    context = "\n".join(parts).strip()
+    metadata_context = "\n".join(parts).strip()
 
     pdf_url = _find_pdf_link(serpapi_result)
     if pdf_url:
         pdf_text = await fetch_pdf_text_from_link(pdf_url)
         if pdf_text:
-            context = f"{context}\n\nFull text (PDF first pages): {pdf_text}".strip()
-    return context
+            return f"{metadata_context}\n\n[Full-Text Extract from PDF]:\n{pdf_text}".strip()
+    return metadata_context
 
 
 def _parse_result(result: dict) -> RawPaper | None:

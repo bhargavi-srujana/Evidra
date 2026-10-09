@@ -63,6 +63,25 @@ def test_cache_key_stable_and_sensitive():
     assert rs._search_cache_key("sleep grades") != rs._search_cache_key("diet grades")
 
 
+def test_cache_key_splits_opposite_polarity():
+    """Opposite questions share literature but anchor opposite verdicts, so
+    they must never share a cached response."""
+    q1 = "men compared women sleep"
+    k1 = rs._search_cache_key(q1, "men (compared to women)", "sleep", "positive")
+    k2 = rs._search_cache_key(q1, "women (compared to men)", "sleep", "positive")
+    assert k1 != k2
+    assert k1 == rs._search_cache_key(q1, "men (compared to women)", "sleep", "positive")
+
+
+def test_cache_key_splits_result_limits():
+    """A response cached at a small limit must never satisfy a later request
+    for more studies (entries slice down, never expand)."""
+    small = rs._search_cache_key("sleep grades", "", "", "unclear", 3)
+    large = rs._search_cache_key("sleep grades", "", "", "unclear", 10)
+    assert small != large
+    assert small == rs._search_cache_key("sleep grades", "", "", "unclear", 3)
+
+
 def test_coerce_slices_and_filters_claims():
     doc = {
         "results": [_study_doc("s1"), _study_doc("s2")],
@@ -78,6 +97,22 @@ def test_coerce_slices_and_filters_claims():
 def test_coerce_rejects_empty_or_corrupt():
     assert rs._coerce_cached_response({"results": [], "claims": []}, "q", 10) is None
     assert rs._coerce_cached_response({"results": [{"nope": 1}]}, "q", 10) is None
+
+
+def test_coerce_rejects_studies_without_claims():
+    """Pre-backstop entries leaving a study claim-less read as a miss so the
+    query re-extracts instead of serving papers with no conclusion."""
+    doc = {
+        "results": [_study_doc("s1"), _study_doc("s2")],
+        "claims": [_claim_doc("c1", "s1")],  # s2 has no conclusion
+    }
+    assert rs._coerce_cached_response(doc, "q", 10) is None
+    # Fully-covered entries still hit.
+    full = {
+        "results": [_study_doc("s1"), _study_doc("s2")],
+        "claims": [_claim_doc("c1", "s1"), _claim_doc("c2", "s2")],
+    }
+    assert rs._coerce_cached_response(full, "q", 10) is not None
 
 
 def test_is_cacheable_signal_rules():
@@ -177,8 +212,13 @@ async def test_route_miss_stores_cacheable_response():
         )
     assert resp.status_code == 200, resp.text
     assert store.await_count == 1
-    key, neutral, response = store.await_args.args
-    assert key == rs._search_cache_key("sleep grades") == rs._search_cache_key(neutral)
+    key, neutral, response = store.await_args.args[:3]
+    assert response.anchor_question == "sleep grades?"
+    assert (
+        key
+        == rs._search_cache_key("sleep grades", "", "", "unclear", 5)
+        == rs._search_cache_key(neutral, "", "", "unclear", 5)
+    )
     assert len(response.results) == 1
 
 
@@ -202,3 +242,33 @@ async def test_route_miss_with_total_failure_does_not_store():
         )
     assert resp.status_code == 200, resp.text
     store.assert_not_awaited()
+
+
+async def test_route_miss_empty_claims_gets_backstop_conclusion():
+    """LLM returning zero claims still yields one unclear conclusion per
+    paper through the real route (no paper vanishes from the corpus)."""
+    from app.services.common import RawPaper
+
+    papers = [RawPaper(title="Paper One", snippet="Abstract one " * 20, year=2023)]
+    payload = {"design": _study_doc("x")["design"], "claims": []}
+    with (
+        patch.object(rs, "_cache_lookup", AsyncMock(return_value=None)),
+        patch.object(rs, "_retrieve_papers", AsyncMock(return_value=papers)),
+        patch(
+            "app.services.extraction._chat_json",
+            AsyncMock(return_value=payload),
+        ),
+        patch.object(rs, "_persist_studies_and_claims", AsyncMock()),
+        patch.object(rs, "_cache_store", AsyncMock()),
+    ):
+        resp = TestClient(app).post(
+            "/api/v1/search", json={"query": "sleep grades", "max_results": 5}
+        )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert len(body["results"]) == 1
+    assert len(body["claims"]) == 1
+    claim = body["claims"][0]
+    assert claim["effect_direction"] == "unclear"
+    assert claim["conclusion"], "backstop must provide a conclusion"
+    assert claim["verbatim_evidence_quote"], "backstop must quote verbatim text"

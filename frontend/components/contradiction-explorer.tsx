@@ -14,7 +14,7 @@ import type {
   PairwiseContradiction,
   Study,
 } from "@/lib/types";
-import { EFFECT_BADGE, effectForStudy, formatEffectLabel } from "@/lib/effects";
+import { effectBadge, effectForStudy, formatEffectLabel } from "@/lib/effects";
 import { cn } from "@/lib/utils";
 
 interface ContradictionExplorerProps {
@@ -60,7 +60,7 @@ function StudyMiniCard({
           <span
             className={cn(
               "inline-flex shrink-0 items-center rounded-full px-2 py-0.5 text-xs font-medium",
-              EFFECT_BADGE[direction],
+              effectBadge(direction),
             )}
           >
             {formatEffectLabel(direction)}
@@ -81,7 +81,9 @@ function StudyMiniCard({
             >
               {claim.text}
               <span className="ml-1 font-mono text-[10px] text-zinc-400">
-                {(claim.confidence_score * 100).toFixed(0)}%
+                {Number.isFinite(claim.confidence_score)
+                  ? `${Math.round(claim.confidence_score * 100)}%`
+                  : "—"}
               </span>
             </li>
           ))}
@@ -113,12 +115,12 @@ function ContradictionItem({
       const i = DIMENSION_ORDER.indexOf(dim);
       return i === -1 ? DIMENSION_ORDER.length : i;
     };
-    return [...contradiction.method_differences].sort(
+    return [...(contradiction.method_differences ?? [])].sort(
       (a, b) => rank(a.dimension) - rank(b.dimension),
     );
   }, [contradiction]);
 
-  const highCount = contradiction.method_differences.filter(
+  const highCount = (contradiction.method_differences ?? []).filter(
     (d) => d.impact_level === "HIGH",
   ).length;
 
@@ -128,13 +130,14 @@ function ContradictionItem({
         type="button"
         onClick={onToggle}
         aria-expanded={open}
+        aria-controls={`contradiction-panel-${contradiction.study_a_id}-${contradiction.study_b_id}`}
         className="flex w-full items-center gap-2 bg-zinc-50 px-4 py-3 text-left text-sm font-medium text-zinc-900 hover:bg-zinc-100 dark:bg-zinc-900 dark:text-zinc-50 dark:hover:bg-zinc-800"
       >
         <GitCompareArrows
           className="h-4 w-4 shrink-0 text-zinc-500"
           aria-hidden="true"
         />
-        <span className="min-w-0 flex-1 truncate">
+        <span className="min-w-0 flex-1 truncate" title={`${contradiction.study_a_id} versus ${contradiction.study_b_id}`}>
           {contradiction.study_a_id} ↔ {contradiction.study_b_id}
         </span>
         {highCount > 0 ? (
@@ -152,7 +155,10 @@ function ContradictionItem({
       </button>
 
       {open ? (
-        <div className="space-y-4 bg-white p-4 dark:bg-zinc-950">
+        <div
+          id={`contradiction-panel-${contradiction.study_a_id}-${contradiction.study_b_id}`}
+          className="space-y-4 bg-white p-4 dark:bg-zinc-950"
+        >
           <div className="flex flex-col gap-3 md:flex-row">
             {studyA ? (
               <StudyMiniCard study={studyA} claims={claimsA} />
@@ -271,14 +277,19 @@ export default function ContradictionExplorer({
   claims,
   className,
 }: ContradictionExplorerProps) {
-  const [openIds, setOpenIds] = useState<Set<string>>(
-    () =>
-      new Set(
-        contradictions.length > 0
-          ? [`${contradictions[0].study_a_id}-${contradictions[0].study_b_id}-0`]
-          : [],
-      ),
-  );
+  const [openIds, setOpenIds] = useState<Set<string>>(() => new Set());
+  const [prevCorpusKey, setPrevCorpusKey] = useState<string | null>(null);
+  const corpusKey = contradictions
+    .map((c) => `${c.study_a_id}-${c.study_b_id}`)
+    .join("|");
+  // Derived state: reset the default-open item when the corpus changes
+  // (query → query navigation). Render-phase adjustment is the recommended
+  // React pattern for this; no effect needed.
+  if (prevCorpusKey !== corpusKey) {
+    setPrevCorpusKey(corpusKey);
+    const first = contradictions.at(0);
+    setOpenIds(new Set(first ? [`${first.study_a_id}-${first.study_b_id}-0`] : []));
+  }
 
   const studyById = useMemo(
     () => new Map(studies.map((s) => [s.study_id, s])),

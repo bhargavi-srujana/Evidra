@@ -45,7 +45,13 @@ _DIMENSIONS: tuple[tuple[str, str, str], ...] = (
     ("study_duration", "Study Duration", "LOW"),
 )
 _SAMPLE_SIZE_UPGRADE_RATIO = 10  # 10x numeric gap promotes Sample Size to MEDIUM
-_INT_RE = re.compile(r"\d[\d,]*")
+# Sample-size cues only (see gap_analysis): never mistake a year for N.
+_SAMPLE_N_RE = re.compile(r"\b[NMnm]\s*=\s*(\d[\d,]*)")
+_SAMPLE_UNIT_RE = re.compile(
+    r"\b(\d[\d,]*)\s+"
+    r"(participants|subjects|students|patients|volunteers|adults|children|samples?|trials)\b",
+    re.IGNORECASE,
+)
 
 
 def _tokens(text: str) -> set[str]:
@@ -100,13 +106,18 @@ async def _label_topics_with_llm(
         for cluster in clusters:
             label = topics.get(cluster.cluster_id)
             if isinstance(label, str) and label.strip():
-                cluster.topic = label.strip()[:80]
+                cleaned = re.sub(r"\s+", " ", label.strip())[:80]
+                # Enforce the prompt contract (<=6 words, no stats/IDs):
+                # over-long or digit-heavy labels fall back to keywords.
+                words = cleaned.split()
+                if len(words) <= 6 and not re.search(r"\d{4,}|\b[cC]-?\d+\b", cleaned):
+                    cluster.topic = cleaned
     except Exception as exc:  # noqa: BLE001 - keyword labels remain
         logger.info("LLM topic labeling skipped: %s", exc)
 
 
 async def cluster_claims(claims: list[Claim]) -> list[ClaimCluster]:
-    """Group claims into semantic topics; serializes to a list of dicts.
+    """Group claims into semantic topics; returns a list of ClaimCluster.
 
     Greedy agglomerative clustering over Jaccard token similarity
     (deterministic, dependency-free). Topics come from keyword labels,
@@ -147,10 +158,22 @@ async def cluster_claims(claims: list[Claim]) -> list[ClaimCluster]:
 
 
 def _parse_int(value: str | None) -> int | None:
+    """Participant count from explicit sample cues, else None (never a year)."""
     if not value:
         return None
-    match = _INT_RE.search(value.replace(",", ""))
-    return int(match.group(0)) if match else None
+    match = _SAMPLE_N_RE.search(value)
+    if match:
+        try:
+            return int(match.group(1).replace(",", ""))
+        except ValueError:
+            pass
+    match = _SAMPLE_UNIT_RE.search(value)
+    if match:
+        try:
+            return int(match.group(1).replace(",", ""))
+        except ValueError:
+            return None
+    return None
 
 
 def _diff_designs(study_a: Study, study_b: Study) -> list[MethodologicalDifference]:

@@ -1,6 +1,6 @@
 import { ExternalLink, Users, CalendarDays, FlaskConical } from "lucide-react";
 import type { EffectDirection, Study } from "@/lib/types";
-import { EFFECT_BADGE, formatEffectLabel } from "@/lib/effects";
+import { effectBadge, formatEffectLabel } from "@/lib/effects";
 import { cn } from "@/lib/utils";
 
 interface StudyCardProps {
@@ -66,7 +66,7 @@ export default function StudyCard({
           <span
             className={cn(
               "inline-flex shrink-0 items-center rounded-full px-2.5 py-1 text-xs font-medium",
-              EFFECT_BADGE[effectDirection],
+              effectBadge(effectDirection),
             )}
           >
             {formatEffectLabel(effectDirection)}
@@ -81,7 +81,7 @@ export default function StudyCard({
         </span>
         <span className="inline-flex items-center gap-1">
           <CalendarDays className="h-3.5 w-3.5" aria-hidden="true" />
-          {study.year}
+          {study.year ?? "Year unknown"}
           {study.venue ? ` · ${study.venue}` : ""}
         </span>
         {study.design.study_type ? (
@@ -93,7 +93,7 @@ export default function StudyCard({
       </div>
 
       <p className="mt-3 line-clamp-3 text-sm leading-relaxed text-zinc-600 dark:text-zinc-300">
-        {study.abstract}
+        {study.abstract?.trim() || "Abstract not reported."}
       </p>
 
       {conclusion ? (

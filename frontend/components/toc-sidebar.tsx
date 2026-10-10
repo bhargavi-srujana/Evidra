@@ -32,7 +32,7 @@ export default function TocSidebar({ className }: { className?: string }) {
     <nav
       aria-label="Table of Contents"
       className={cn(
-        "rounded-2xl border border-neutral-800 bg-black/55 p-4 backdrop-blur-xl",
+        "rounded-2xl border border-neutral-800 bg-[rgb(35,39,42)]/55 p-4 backdrop-blur-xl",
         className,
       )}
     >

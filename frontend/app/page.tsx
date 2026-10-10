@@ -38,16 +38,15 @@ const ENGINE_STEPS = [
 /** Jagged torn-paper edges for the hero stack. */
 const TORN_TOP =
   "polygon(0% 4%, 4% 1.5%, 8% 3.5%, 13% 1%, 18% 3%, 24% 1.2%, 30% 3.2%, 36% 1%, 42% 3%, 48% 1.4%, 54% 3.4%, 60% 1%, 66% 3%, 72% 1.3%, 78% 3.3%, 84% 1%, 89% 3%, 94% 1.4%, 98% 3%, 100% 1.8%, 100% 98%, 96% 100%, 91% 97.5%, 85% 99.5%, 79% 97.8%, 72% 99.6%, 65% 97.6%, 58% 99.4%, 51% 97.7%, 44% 99.5%, 37% 97.8%, 30% 99.4%, 23% 97.6%, 16% 99.3%, 10% 97.7%, 5% 99.2%, 0% 97.5%)";
-
-// Server component by design: everything here is static markup + icons,
-// so no client JS ships for the hero. Interactivity lives in
+// Server component by design: everything here is static markup, so no
+// client JS ships for the hero. Interactivity lives in
 // <BookMasthead /> (search) and <HomeSearch /> (topics).
 export default function HomePage() {
   return (
     <div className="flex min-h-screen flex-col bg-[rgb(35,39,42)] text-neutral-200">
       <DashboardBackground />
 
-      <div className="relative z-10 mx-auto  flex-1 flex-col pt-5 ">
+      <div className="relative z-10 mx-auto flex w-full max-w-5xl flex-1 flex-col py-5">
         <BookMasthead />
 
         {/* ---- torn paper stack hero ---- */}
@@ -79,6 +78,12 @@ export default function HomePage() {
                   clipPath: "polygon(100% 0, 0 0, 100% 100%)",
                 }}
               />
+              {/* ruled lines peeking on the right, like the reference */}
+              <div aria-hidden="true" className="absolute right-6 top-24 hidden w-40 space-y-1.5 opacity-30 sm:block">
+                {[95, 88, 92, 80, 86, 74].map((w, i) => (
+                  <div key={i} className="h-1 rounded bg-neutral-400" style={{ width: `${w}%` }} />
+                ))}
+              </div>
               <div className="relative px-6 pb-10 pt-10 text-center sm:px-12">
                 <h1 className="text-3xl font-extrabold tracking-tight text-neutral-950 sm:text-[42px] sm:leading-[1.1]">
                   What does the evidence say?
@@ -119,7 +124,7 @@ export default function HomePage() {
                   alt={imgAlt}
                   width={160}
                   height={160}
-                  className={`pointer-events-none shrink-0 object-contain mix-blend-screen ${imgClassName}`}
+                  className={`pointer-events-none shrink-0 object-contain ${imgClassName}`}
                 />
               </div>
             ))}

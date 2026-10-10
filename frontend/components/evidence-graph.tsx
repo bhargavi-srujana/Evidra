@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ReactFlow,
   Background,
@@ -39,6 +39,8 @@ interface EvidenceGraphProps {
   tone?: "dark" | "paper";
   /** Shorter canvas for collage embedding. */
   compact?: boolean;
+  /** Wide, taller canvas for full-width landscape embedding. */
+  landscape?: boolean;
 }
 
 type SelectedNode =
@@ -46,7 +48,7 @@ type SelectedNode =
   | { kind: "cluster"; clusterId: string }
   | { kind: "study"; studyId: string };
 
-const DIM_OPACITY = 0.35;
+const DIM_OPACITY = 0.55;
 const EDGE_STYLE = {
   dark: { stroke: "#52525b", strokeWidth: 1.5 },
   paper: { stroke: "#71717a", strokeWidth: 1.25 },
@@ -61,7 +63,7 @@ const NODE_SURFACE = {
   paper: {
     backgroundColor: "#ffffff",
     color: "#27272a",
-    fontSize: 11,
+    fontSize: 12,
     boxShadow: "0 1px 3px rgba(0,0,0,0.25)",
   },
 } as const;
@@ -90,11 +92,27 @@ export default function EvidenceGraph({
   className,
   tone = "dark",
   compact = false,
+  landscape = false,
 }: EvidenceGraphProps) {
   const [selected, setSelected] = useState<SelectedNode | null>(null);
   const surface = NODE_SURFACE[tone];
   const accent = ACCENT[tone];
   const edgeStyle = EDGE_STYLE[tone];
+
+  // Measured canvas width so the tiered layout stays centered and fills
+  // any container (narrow side slot or full-width landscape).
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [canvasWidth, setCanvasWidth] = useState(800);
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver((entries) => {
+      const w = entries[0]?.contentRect.width;
+      if (w && w > 0) setCanvasWidth(w);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   const claimById = useMemo(
     () => new Map(claims.map((c) => [c.claim_id, c])),
@@ -131,49 +149,59 @@ export default function EvidenceGraph({
     };
 
     const questionId = "question";
+    const questionWidth = 200;
     builtNodes.push({
       id: questionId,
       type: "input",
-      position: { x: 340, y: 0 },
+      position: { x: canvasWidth / 2 - questionWidth / 2, y: 0 },
       data: { label: truncate(query || "Research question", 60) },
       style: {
         ...surface,
         borderColor: accent.question,
         borderWidth: 2,
-        width: 180,
+        width: questionWidth,
       },
     });
 
+    const clusterWidth = 170;
+    const margin = 40;
+    const spread = Math.max(canvasWidth - margin * 2 - clusterWidth, 0);
     const nClusters = Math.max(clusters.length, 1);
     // Roomy layout: up to 3 clusters share one row; more spill onto a
     // second staggered tier so labels never stack into a dark mass.
     const twoTier = nClusters > 3;
     clusters.forEach((cluster, i) => {
       const id = `cluster:${cluster.cluster_id}`;
+      const place = (slot: number, slots: number) =>
+        slots === 1
+          ? canvasWidth / 2 - clusterWidth / 2
+          : margin + (slot * spread) / (slots - 1);
       let x: number;
       let y: number;
       if (nClusters === 1) {
-        x = 340;
+        x = place(0, 1);
         y = 170;
       } else if (!twoTier) {
-        x = 40 + (i * 760) / (nClusters - 1) - 60;
+        x = place(i, nClusters);
         y = 170;
       } else {
         const tier = i % 2;
         const k = Math.floor(i / 2);
         const perTier = Math.ceil(nClusters / 2);
-        x = perTier === 1 ? 340 : 40 + (k * 760) / (perTier - 1) - 60;
-        y = tier === 0 ? 150 : 270;
+        x = place(k, perTier);
+        y = tier === 0 ? 150 : 280;
       }
       builtNodes.push({
         id,
         position: { x, y },
-        data: { label: truncate(cluster.topic, 32) },
+        data: {
+          label: `${truncate(cluster.topic, 34)} · ${cluster.claim_ids.length}`,
+        },
         style: {
           ...surface,
           borderColor: accent.cluster,
           borderWidth: 1.5,
-          width: 150,
+          width: clusterWidth,
         },
       });
       builtEdges.push({
@@ -185,8 +213,18 @@ export default function EvidenceGraph({
       link(questionId, id);
     });
 
-    const studiesTop = (twoTier ? 270 : 170) + 160;
-    const perRow = 3;
+    const studiesTop = (twoTier ? 280 : 170) + 170;
+    const studyWidth = 190;
+    const studyGap = 30;
+    const perRow = Math.max(
+      2,
+      Math.min(
+        4,
+        Math.floor((canvasWidth - margin * 2 + studyGap) / (studyWidth + studyGap)),
+      ),
+    );
+    const rowWidth = perRow * studyWidth + (perRow - 1) * studyGap;
+    const rowX = (canvasWidth - rowWidth) / 2;
     studies.forEach((study, i) => {
       const id = `study:${study.study_id}`;
       const direction = effectForStudy(study.study_id, claims);
@@ -195,13 +233,13 @@ export default function EvidenceGraph({
       const col = i % perRow;
       builtNodes.push({
         id,
-        position: { x: 60 + col * 230, y: studiesTop + row * 140 },
-        data: { label: `paper snippet: ${truncate(study.title, 28)}` },
+        position: { x: rowX + col * (studyWidth + studyGap), y: studiesTop + row * 150 },
+        data: { label: truncate(study.title, 44) },
         style: {
           ...surface,
           borderColor: color,
           borderWidth: 1.5,
-          width: 170,
+          width: studyWidth,
         },
       });
       for (const cluster of clusters) {
@@ -237,7 +275,7 @@ export default function EvidenceGraph({
     }
 
     return { nodes: builtNodes, edges: builtEdges, neighborMap: neighbors };
-  }, [query, clusters, studies, claims, contradictions, studyById, clusterStudies, surface, accent, edgeStyle]);
+  }, [query, clusters, studies, claims, contradictions, studyById, clusterStudies, surface, accent, edgeStyle, canvasWidth]);
 
   const selectedKey = useMemo(() => {
     if (!selected) return null;
@@ -352,12 +390,17 @@ export default function EvidenceGraph({
   return (
     <div className={cn("space-y-2", className)}>
       <div
+        ref={containerRef}
         className={cn(
           "w-full overflow-hidden",
-          compact ? "h-[360px]" : "h-[380px]",
+          landscape
+            ? "h-[440px]"
+            : compact
+              ? "h-[360px]"
+              : "h-[380px]",
           onPaper
             ? "rounded-lg bg-white"
-            : "rounded-2xl border border-neutral-800 bg-neutral-950",
+            : "rounded-2xl border border-neutral-800 bg-[rgb(35,39,42)]",
         )}
       >
         <ReactFlow
@@ -373,21 +416,13 @@ export default function EvidenceGraph({
         >
           <Background color={onPaper ? "#d4d4d8" : "#3f3f46"} />
           <Controls />
-          {onPaper ? (
-            <MiniMap
-              pannable
-              zoomable
-              style={{ backgroundColor: "#f4f4f5" }}
-              maskColor="rgba(0, 0, 0, 0.08)"
-              className="!m-3 !h-24 !w-36 !overflow-hidden !rounded-xl !border !border-neutral-200"
-            />
-          ) : (
+          {onPaper ? null : (
             <MiniMap
               pannable
               zoomable
               style={{ backgroundColor: "#09090b" }}
               maskColor="rgba(0, 0, 0, 0.55)"
-              className="!m-3 !h-28 !w-44 !overflow-hidden !rounded-xl !border !border-neutral-800 !bg-neutral-950"
+              className="!m-3 !h-28 !w-44 !overflow-hidden !rounded-xl !border !border-neutral-800 !bg-[rgb(35,39,42)]"
             />
           )}
         </ReactFlow>
@@ -427,8 +462,8 @@ export default function EvidenceGraph({
         )}
       </div>
       <p className={cn("text-[11px]", onPaper ? "text-neutral-500" : "text-neutral-500")}>
-        Force-directed layout of claim snippets and paper snippets — red dashed
-        edges mark contradictions.
+        Topic clusters fan out from the question — red dashed edges mark
+        contradictions.
       </p>
 
       {detail ? (

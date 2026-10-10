@@ -11,8 +11,10 @@ interface QueryBarProps {
   onSearch: (query: string) => void | Promise<void>;
   className?: string;
   /** "dark" renders a charcoal pill for use on light paper mastheads. */
-  /** "transparent" renders a borderless glass bar that stays clear in both color schemes. */
+  /** "transparent" renders a clear bar that stays transparent in both color schemes. */
   tone?: "light" | "dark" | "transparent";
+  /** Compact renders a smaller bar (shorter input/button, tighter padding). */
+  compact?: boolean;
 }
 
 export default function QueryBar({
@@ -21,6 +23,7 @@ export default function QueryBar({
   onSearch,
   className,
   tone = "light",
+  compact = false,
 }: QueryBarProps) {
   // State initializes from initialQuery on mount. Parents navigating
   // query-to-query pass key={query} so the header remounts instead of
@@ -44,7 +47,8 @@ export default function QueryBar({
     >
       <div
         className={cn(
-          "flex w-full items-center gap-2 rounded-2xl border p-2 shadow-sm focus-within:ring-2",
+          "flex w-full items-center gap-2 rounded-2xl border shadow-sm focus-within:ring-2",
+          compact ? "p-1.5" : "p-2",
           transparent
             ? "border-neutral-400/60 bg-white/10 backdrop-blur-sm focus-within:border-neutral-500 focus-within:ring-neutral-500/20"
             : dark
@@ -54,7 +58,8 @@ export default function QueryBar({
       >
         <Search
           className={cn(
-            "ml-2 h-5 w-5 shrink-0",
+            "ml-2 shrink-0",
+            compact ? "h-4 w-4" : "h-5 w-5",
             transparent
               ? "text-neutral-500"
               : dark
@@ -73,7 +78,8 @@ export default function QueryBar({
           onChange={(e) => setQuery(e.target.value)}
           placeholder="Search Evidra — ask a research question…"
           className={cn(
-            "h-11 w-full bg-transparent text-sm outline-none",
+            "w-full bg-transparent outline-none",
+            compact ? "h-9 text-[13px]" : "h-11 text-sm",
             transparent
               ? "text-neutral-800 placeholder:text-neutral-500"
               : dark
@@ -85,7 +91,8 @@ export default function QueryBar({
           type="submit"
           disabled={isLoading || query.trim().length === 0}
           className={cn(
-            "inline-flex h-11 shrink-0 items-center gap-2 rounded-xl px-5 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50",
+            "inline-flex shrink-0 items-center gap-2 rounded-xl font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50",
+            compact ? "h-9 px-4 text-[13px]" : "h-11 px-5 text-sm",
             transparent
               ? "border border-neutral-400/70 bg-transparent text-neutral-700 hover:bg-neutral-900/5"
               : dark

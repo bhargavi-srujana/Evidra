@@ -100,6 +100,7 @@ export default function ResultsPage() {
   const [comparison, setComparison] = useState<ComparisonMatrix | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [warningsOpen, setWarningsOpen] = useState(true);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -182,16 +183,25 @@ export default function ResultsPage() {
         <TocSidebar className="hidden w-60 shrink-0 lg:sticky lg:top-24 lg:block" />
 
         <main className="min-w-0 flex-1 space-y-8 pb-16">
-          {search?.warnings?.map((warning) => (
+          {warningsOpen && search?.warnings && search.warnings.length > 0 ? (
             <div
-              key={warning.slice(0, 48)}
               role="status"
               className="flex items-start gap-2 rounded-2xl border border-amber-700/50 bg-amber-950/60 p-4 text-sm text-amber-200 backdrop-blur-lg"
             >
               <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
-              <span>{warning}</span>
+              <span className="min-w-0 flex-1">
+                {search.warnings.join(" ")}
+              </span>
+              <button
+                type="button"
+                onClick={() => setWarningsOpen(false)}
+                aria-label="Dismiss warnings"
+                className="shrink-0 rounded-lg px-2 py-0.5 text-xs font-medium text-amber-200/70 transition-colors hover:bg-amber-900/60 hover:text-amber-100"
+              >
+                Dismiss
+              </button>
             </div>
-          ))}
+          ) : null}
 
           {error && !isLoading ? (
             <div
@@ -217,11 +227,11 @@ export default function ResultsPage() {
 
           {/* ---- Collage board ---- */}
           <div className="grid grid-cols-1 gap-6 xl:grid-cols-12">
-            {/* Research question paper */}
+            {/* Research question paper: full width on top */}
             <section
               id="query-overview"
               aria-label="Query overview"
-              className="scroll-mt-28 xl:col-span-7"
+              className="scroll-mt-28 xl:col-span-12"
             >
               <PaperDoc staple tilt="left" className="p-6 sm:p-7">
                 <p className="text-xs font-semibold uppercase tracking-[0.18em] text-neutral-500">
@@ -241,10 +251,11 @@ export default function ResultsPage() {
               </PaperDoc>
             </section>
 
-            {/* Key Contradiction Clusters paper */}
+            {/* Key Contradiction Clusters paper: full width below the
+                question, landscape canvas */}
             <div
               id="evidence-graph"
-              className="scroll-mt-28 xl:col-span-5 xl:-ml-2 xl:mt-10"
+              className="scroll-mt-28 xl:col-span-12"
             >
               <PaperDoc tilt="right" className="p-5">
                 <h2
@@ -264,7 +275,7 @@ export default function ResultsPage() {
                       claims={claims}
                       contradictions={comparison?.contradictions ?? []}
                       tone="paper"
-                      compact
+                      landscape
                     />
                   ) : error ? null : (
                     <p role="status" className="text-sm text-neutral-500">
@@ -273,9 +284,6 @@ export default function ResultsPage() {
                     </p>
                   )}
                 </div>
-                <p className="mt-2 text-center text-[11px] text-neutral-500">
-                  Force snippets — red edges mark contradictions
-                </p>
               </PaperDoc>
             </div>
 

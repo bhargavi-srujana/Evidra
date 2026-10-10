@@ -114,6 +114,8 @@ export interface SearchResponse {
   outcome?: string;
   expected_direction?: string;
   anchor_question?: string;
+  /** Degradation notices (e.g. quota-exhausted heuristic verdicts). */
+  warnings?: string[];
 }
 
 export interface CompareRequest {

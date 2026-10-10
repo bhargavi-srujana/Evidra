@@ -12,7 +12,7 @@ export function EvidenceGraphSkeleton() {
     <div
       aria-busy="true"
       aria-label="Loading evidence graph"
-      className="h-[380px] w-full animate-pulse rounded-2xl bg-zinc-100 dark:bg-zinc-900"
+      className="h-[380px] w-full animate-pulse rounded-2xl border border-neutral-800 bg-neutral-900/70"
     />
   );
 }
@@ -23,20 +23,20 @@ export function EvidenceSummarySkeleton({ className }: { className?: string }) {
       aria-busy="true"
       aria-label="Loading evidence overview"
       className={cn(
-        "rounded-2xl border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-950",
+        "rounded-[3px] bg-neutral-100 p-5",
         className,
       )}
     >
-      <div className="h-4 w-40 animate-pulse rounded bg-zinc-200 dark:bg-zinc-800" />
+      <div className="h-4 w-40 animate-pulse rounded bg-neutral-300" />
       <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
         {Array.from({ length: 4 }).map((_, i) => (
           <div
             key={i}
-            className="h-20 animate-pulse rounded-lg bg-zinc-100 dark:bg-zinc-900"
+            className="h-20 animate-pulse rounded-lg bg-neutral-200"
           />
         ))}
       </div>
-      <div className="mt-3 h-44 animate-pulse rounded-xl bg-zinc-100 dark:bg-zinc-900" />
+      <div className="mt-3 h-44 animate-pulse rounded-xl bg-neutral-200" />
     </div>
   );
 }

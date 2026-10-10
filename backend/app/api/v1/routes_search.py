@@ -77,6 +77,11 @@ class SearchResponse(BaseModel):
     outcome: str = ""
     expected_direction: str = "unclear"
     anchor_question: str = ""
+    # Degradation notices: non-empty when some studies fell back to
+    # heuristic/blank records (LLM quota exhaustion, thin snippets). The UI
+    # renders these so "all Unclear" is never mistaken for a scientific
+    # consensus.
+    warnings: list[str] = Field(default_factory=list)
 
 
 def _needs_enrichment(papers: list[RawPaper]) -> bool:
@@ -296,6 +301,7 @@ def _coerce_cached_response(doc: dict, query: str, max_results: int) -> SearchRe
         outcome=str(doc.get("outcome", "") or ""),
         expected_direction=str(doc.get("expected_direction", "") or "unclear"),
         anchor_question=str(doc.get("anchor_question", "") or ""),
+        warnings=list(doc.get("warnings", []) or []),
     )
 
 
@@ -343,6 +349,7 @@ async def _cache_store(
             or (parsed.expected_direction if parsed else "unclear"),
             "anchor_question": response.anchor_question
             or (parsed.anchor_question if parsed else ""),
+            "warnings": response.warnings,
             "created_at": now,
             "updated_at": now,
         }
@@ -478,6 +485,36 @@ async def _run_singleflight(key: str, factory) -> SearchResponse:  # type: ignor
             _inflight_searches.pop(key, None)
 
 
+def _degradation_warnings(studies: list[Study]) -> list[str]:
+    """Explain heuristic verdicts so "all Unclear" is never misread.
+
+    Studies flagged `is_fallback` were not analyzed by the LLM — typically
+    quota/rate-limit exhaustion (heuristic title/snippet guess at 0.3
+    confidence) or snippets too thin for even a backstop claim. Their
+    "Unclear" verdicts describe pipeline limits, not the science.
+    """
+    total = len(studies)
+    degraded = sum(1 for s in studies if s.is_fallback)
+    if total == 0 or degraded == 0:
+        return []
+    if degraded == total:
+        return [
+            (
+                "The LLM could not analyze any of the retrieved studies on this run "
+                "(rate/quota limits or snippets too thin). Every verdict below is a "
+                "low-confidence heuristic, not an LLM judgment. Wait for quota to reset, "
+                "then search again."
+            )
+        ]
+    return [
+        (
+            f"{degraded} of {total} studies were not analyzed by the LLM on this run "
+            "(rate/quota limits or thin snippets) and show heuristic Unclear verdicts. "
+            "The rest are LLM-analyzed."
+        )
+    ]
+
+
 async def _search_fresh(
     payload: SearchRequest, neutral: str, cache_key: str, parsed
 ) -> SearchResponse:  # type: ignore[no-untyped-def]
@@ -555,6 +592,7 @@ async def _search_fresh(
         outcome=parsed.outcome,
         expected_direction=parsed.expected_direction,
         anchor_question=parsed.anchor_question,
+        warnings=_degradation_warnings(studies),
     )
     await _persist_studies_and_claims(studies, claims)
     if _is_cacheable(studies, claims):

@@ -78,3 +78,99 @@ async def test_default_anchor_unchanged_without_anchor_question():
             "T", "abstract", "s", intervention="sleeping less", outcome="grades"
         )
     assert "Does sleeping less increase grades?" in captured["user"]
+
+
+def test_degradation_warnings_none_when_all_llm():
+    from app.api.v1 import routes_search as rs
+    from app.models.study import Study
+
+    studies = [
+        Study(
+            study_id="s1",
+            title="T",
+            authors=[],
+            year=2020,
+            abstract="a",
+            design={n: "x" for n in Study.model_fields["design"].annotation.model_fields},
+        )
+    ]
+    assert rs._degradation_warnings(studies) == []
+
+
+def test_degradation_warnings_all_fallback():
+    from app.api.v1 import routes_search as rs
+    from app.models.study import Study
+
+    design_fields = Study.model_fields["design"].annotation.model_fields
+    studies = [
+        Study(
+            study_id=f"s{i}",
+            title="T",
+            authors=[],
+            year=2020,
+            abstract="a",
+            design={n: "x" for n in design_fields},
+            is_fallback=True,
+        )
+        for i in range(3)
+    ]
+    warnings = rs._degradation_warnings(studies)
+    assert len(warnings) == 1
+    assert "could not analyze" in warnings[0]
+
+
+def test_degradation_warnings_partial_counts():
+    from app.api.v1 import routes_search as rs
+    from app.models.study import Study
+
+    design_fields = Study.model_fields["design"].annotation.model_fields
+    kwargs = dict(title="T", authors=[], year=2020, abstract="a")
+
+    def make(sid, fallback):
+        return Study(
+            study_id=sid,
+            design={n: "x" for n in design_fields},
+            is_fallback=fallback,
+            **kwargs,
+        )
+
+    warnings = rs._degradation_warnings([make("s1", True), make("s2", False)])
+    assert len(warnings) == 1
+    assert "1 of 2" in warnings[0]
+
+
+async def test_quota_exhausted_run_returns_warnings_not_silence():
+    """All-429 run: HTTP 200 with heuristic verdicts AND a warning, so "all
+    Unclear" is never mistaken for consensus."""
+    from unittest.mock import AsyncMock
+
+    from fastapi.testclient import TestClient
+
+    from app.api.v1 import routes_search as rs
+    from app.main import app
+    from app.services.common import RawPaper
+
+    settings = cfg.get_settings()
+    settings.OPENAI_API_KEY = "sk-test"
+    settings.LLM_MIN_INTERVAL_SECONDS = 0
+    settings.LLM_MAX_RETRY_DELAY_SECONDS = 0.01
+
+    papers = [RawPaper(title="Paper One", snippet="Abstract one " * 20, year=2023)]
+    with (
+        patch.object(rs, "_cache_lookup", AsyncMock(return_value=None)),
+        patch.object(rs, "_retrieve_papers", AsyncMock(return_value=papers)),
+        patch(
+            "app.services.extraction._chat_json",
+            AsyncMock(side_effect=Exception("429 quota exhausted")),
+        ),
+        patch.object(rs, "_persist_studies_and_claims", AsyncMock()),
+        patch.object(rs, "_cache_store", AsyncMock()),
+    ):
+        resp = TestClient(app).post(
+            "/api/v1/search", json={"query": "do men sleep more than women", "max_results": 1}
+        )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["results"][0]["is_fallback"] is True
+    assert body["warnings"] and "could not analyze" in body["warnings"][0]
+    assert body["anchor_question"] == "Do men sleep more than women?"

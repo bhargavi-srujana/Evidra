@@ -25,9 +25,9 @@ interface ContradictionExplorerProps {
 }
 
 const IMPACT_STYLES: Record<ImpactLevel, string> = {
-  HIGH: "bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300",
-  MEDIUM: "bg-orange-100 text-orange-800 dark:bg-orange-950 dark:text-orange-300",
-  LOW: "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300",
+  HIGH: "bg-red-100 text-red-800",
+  MEDIUM: "bg-orange-100 text-orange-800",
+  LOW: "bg-zinc-100 text-zinc-600",
 };
 
 /** Fixed display order for PICO rows; extras from the backend append after. */
@@ -51,9 +51,9 @@ function StudyMiniCard({
 }) {
   const direction = effectForStudy(study.study_id, claims);
   return (
-    <div className="flex-1 rounded-xl border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-950">
+    <div className="flex-1 rounded-xl border border-zinc-200 bg-white p-4">
       <div className="flex flex-wrap items-start justify-between gap-2">
-        <h4 className="text-sm font-semibold leading-snug text-zinc-900 dark:text-zinc-50">
+        <h4 className="text-sm font-semibold leading-snug text-zinc-900">
           {study.title}
         </h4>
         {direction ? (
@@ -67,9 +67,9 @@ function StudyMiniCard({
           </span>
         ) : null}
       </div>
-      <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+      <p className="mt-1 text-xs text-zinc-500">
         {study.authors.map((a) => a.name).join(", ") || "Unknown authors"} ·{" "}
-        {study.year}
+        {study.year ?? "Year unknown"}
         {study.venue ? ` · ${study.venue}` : ""}
       </p>
       {claims.length > 0 ? (
@@ -77,7 +77,7 @@ function StudyMiniCard({
           {claims.map((claim) => (
             <li
               key={claim.claim_id}
-              className="rounded-lg bg-zinc-50 px-2 py-1.5 text-xs text-zinc-600 dark:bg-zinc-900 dark:text-zinc-300"
+              className="rounded-lg bg-zinc-50 px-2 py-1.5 text-xs text-zinc-600"
             >
               {claim.text}
               <span className="ml-1 font-mono text-[10px] text-zinc-400">
@@ -125,13 +125,13 @@ function ContradictionItem({
   ).length;
 
   return (
-    <li className="overflow-hidden rounded-xl border border-zinc-200 dark:border-zinc-800">
+    <li className="overflow-hidden rounded-xl border border-zinc-200 bg-white">
       <button
         type="button"
         onClick={onToggle}
         aria-expanded={open}
         aria-controls={`contradiction-panel-${contradiction.study_a_id}-${contradiction.study_b_id}`}
-        className="flex w-full items-center gap-2 bg-zinc-50 px-4 py-3 text-left text-sm font-medium text-zinc-900 hover:bg-zinc-100 dark:bg-zinc-900 dark:text-zinc-50 dark:hover:bg-zinc-800"
+        className="flex w-full items-center gap-2 bg-zinc-100 px-4 py-3 text-left text-sm font-medium text-zinc-900 hover:bg-zinc-200"
       >
         <GitCompareArrows
           className="h-4 w-4 shrink-0 text-zinc-500"
@@ -141,7 +141,7 @@ function ContradictionItem({
           {contradiction.study_a_id} ↔ {contradiction.study_b_id}
         </span>
         {highCount > 0 ? (
-          <span className="shrink-0 rounded-full bg-red-100 px-2 py-0.5 text-xs font-medium text-red-800 dark:bg-red-950 dark:text-red-300">
+          <span className="shrink-0 rounded-full bg-red-100 px-2 py-0.5 text-xs font-medium text-red-800">
             {highCount} HIGH
           </span>
         ) : null}
@@ -157,7 +157,7 @@ function ContradictionItem({
       {open ? (
         <div
           id={`contradiction-panel-${contradiction.study_a_id}-${contradiction.study_b_id}`}
-          className="space-y-4 bg-white p-4 dark:bg-zinc-950"
+          className="space-y-4 bg-white p-4"
         >
           <div className="flex flex-col gap-3 md:flex-row">
             {studyA ? (
@@ -179,14 +179,14 @@ function ContradictionItem({
           {orderedDiffs.length > 0 ? (
             <div className="overflow-x-auto">
               <table className="w-full min-w-[480px] text-xs">
-                <caption className="pb-2 text-left font-medium text-zinc-500 dark:text-zinc-400">
+                <caption className="pb-2 text-left font-medium text-zinc-500">
                   <span className="inline-flex items-center gap-1.5">
                     <FlaskConical className="h-3.5 w-3.5" aria-hidden="true" />
                     PICO differences
                   </span>
                 </caption>
                 <thead>
-                  <tr className="border-b border-zinc-200 text-left text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
+                  <tr className="border-b border-zinc-200 text-left text-zinc-500">
                     <th scope="col" className="py-1.5 pr-2 font-medium">
                       Dimension
                     </th>
@@ -205,15 +205,15 @@ function ContradictionItem({
                   {orderedDiffs.map((d) => (
                     <tr
                       key={d.dimension}
-                      className="border-b border-zinc-100 last:border-0 dark:border-zinc-900"
+                      className="border-b border-zinc-100 last:border-0"
                     >
-                      <td className="py-1.5 pr-2 font-medium text-zinc-900 dark:text-zinc-100">
+                      <td className="py-1.5 pr-2 font-medium text-zinc-900">
                         {d.dimension}
                       </td>
-                      <td className="py-1.5 pr-2 text-zinc-600 dark:text-zinc-300">
+                      <td className="py-1.5 pr-2 text-zinc-600">
                         {d.study_a_value ?? "Not reported"}
                       </td>
-                      <td className="py-1.5 pr-2 text-zinc-600 dark:text-zinc-300">
+                      <td className="py-1.5 pr-2 text-zinc-600">
                         {d.study_b_value ?? "Not reported"}
                       </td>
                       <td className="py-1.5">
@@ -233,22 +233,22 @@ function ContradictionItem({
             </div>
           ) : null}
 
-          <div className="rounded-xl border border-sky-200 bg-sky-50 p-3 dark:border-sky-900 dark:bg-sky-950">
-            <h4 className="inline-flex items-center gap-1.5 text-xs font-semibold text-sky-900 dark:text-sky-200">
+          <div className="rounded-xl border border-sky-200 bg-sky-50 p-3">
+            <h4 className="inline-flex items-center gap-1.5 text-xs font-semibold text-sky-900">
               <Microscope className="h-3.5 w-3.5" aria-hidden="true" />
               Observed facts
             </h4>
-            <p className="mt-1 text-sm leading-relaxed text-sky-900 dark:text-sky-100">
+            <p className="mt-1 text-sm leading-relaxed text-sky-900">
               {contradiction.observed_difference}
             </p>
           </div>
 
-          <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 dark:border-amber-900 dark:bg-amber-950">
-            <h4 className="inline-flex items-center gap-1.5 text-xs font-semibold text-amber-900 dark:text-amber-200">
+          <div className="rounded-xl border border-amber-200 bg-amber-50 p-3">
+            <h4 className="inline-flex items-center gap-1.5 text-xs font-semibold text-amber-900">
               <Lightbulb className="h-3.5 w-3.5" aria-hidden="true" />
               Possible explanation
             </h4>
-            <p className="mt-1 text-sm leading-relaxed text-amber-900 dark:text-amber-100">
+            <p className="mt-1 text-sm leading-relaxed text-amber-900">
               {contradiction.hypothesized_explanation}
             </p>
           </div>
@@ -264,7 +264,7 @@ export function ContradictionExplorerSkeleton() {
       {Array.from({ length: 2 }).map((_, i) => (
         <div
           key={i}
-          className="h-24 animate-pulse rounded-xl bg-zinc-100 dark:bg-zinc-900"
+          className="h-24 animate-pulse rounded-xl border border-neutral-800 bg-neutral-900/70"
         />
       ))}
     </div>

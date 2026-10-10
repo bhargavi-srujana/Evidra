@@ -5,16 +5,18 @@ import dynamic from "next/dynamic";
 import { useParams, useRouter } from "next/navigation";
 import {
   AlertTriangle,
-  ArrowLeft,
   FlaskConical,
   GitCompareArrows,
-  LineChart,
   ListOrdered,
-  Network,
   TriangleAlert,
 } from "lucide-react";
 
-import QueryBar from "@/components/query-bar";
+import DashboardBackground from "@/components/dashboard-background";
+import BookMasthead from "@/components/book-masthead";
+import FindingsGrid from "@/components/findings-grid";
+import PdfBackstop from "@/components/pdf-backstop";
+import TocSidebar from "@/components/toc-sidebar";
+import { PaperDoc, glassPanel } from "@/components/paper";
 import StudyCard from "@/components/study-card";
 import {
   EvidenceGraphSkeleton,
@@ -56,19 +58,19 @@ function SectionHeading({
     <div className="mb-3">
       <h2
         id={headingId}
-        className="inline-flex items-center gap-2 text-base font-semibold text-zinc-900 dark:text-zinc-50"
+        className="inline-flex items-center gap-2 text-base font-semibold text-neutral-100"
       >
         <span
           aria-hidden="true"
-          className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-zinc-900 text-[11px] font-bold text-white dark:bg-zinc-50 dark:text-zinc-900"
+          className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-neutral-100 text-[11px] font-bold text-neutral-900"
         >
           {index}
         </span>
-        <Icon className="h-4 w-4" aria-hidden="true" />
+        <Icon className="h-4 w-4 text-neutral-400" aria-hidden="true" />
         {title}
       </h2>
       {hint ? (
-        <p className="mt-1 text-xs text-zinc-600 dark:text-zinc-400">{hint}</p>
+        <p className="mt-1 text-xs text-neutral-400">{hint}</p>
       ) : null}
     </div>
   );
@@ -165,205 +167,280 @@ export default function ResultsPage() {
   }, [claims]);
 
   return (
-    <div className="min-h-screen bg-zinc-50 dark:bg-black">
-      <header className="border-b border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-950">
-        <div className="mx-auto flex w-full max-w-6xl items-center gap-4 px-6 py-4">
-          <button
-            type="button"
-            onClick={() => router.push("/")}
-            className="inline-flex items-center gap-1 text-sm text-zinc-500 hover:text-zinc-900 dark:text-zinc-400"
-          >
-            <ArrowLeft className="h-4 w-4" aria-hidden="true" />
-            Home
-          </button>
-          <QueryBar
-            key={query}
-            initialQuery={query}
-            isLoading={isLoading}
-            onSearch={handleSearch}
-            className="max-w-2xl"
-          />
-        </div>
-      </header>
+    <div className="min-h-screen bg-neutral-950 text-neutral-200">
+      <DashboardBackground />
 
-      <main className="mx-auto w-full max-w-6xl space-y-8 px-6 py-8">
-        <div>
-          <p className="text-xs font-medium uppercase tracking-widest text-zinc-400">
-            Research question
-          </p>
-          <h1 className="mt-1 text-2xl font-bold text-zinc-900 dark:text-zinc-50">
-            {query || "Untitled question"}
-          </h1>
-          {search?.anchor_question ? (
-            <p className="mt-2 text-xs text-zinc-600 dark:text-zinc-400">
-              Effect directions are judged against: “{search.anchor_question}”
-              — “Positive” supports it, “Negative” opposes it. Asking the
-              question the other way round mirrors the verdicts by design.
-            </p>
+      <div className="relative z-10 mx-auto w-full max-w-7xl px-4 pt-5 sm:px-6">
+        <BookMasthead
+          initialQuery={query}
+          isLoading={isLoading}
+          onSearch={handleSearch}
+        />
+      </div>
+
+      <div className="relative z-10 mx-auto flex w-full max-w-7xl items-start gap-6 px-4 py-6 sm:px-6">
+        <TocSidebar className="hidden w-60 shrink-0 lg:sticky lg:top-24 lg:block" />
+
+        <main className="min-w-0 flex-1 space-y-8 pb-16">
+          {search?.warnings?.map((warning) => (
+            <div
+              key={warning.slice(0, 48)}
+              role="status"
+              className="flex items-start gap-2 rounded-2xl border border-amber-700/50 bg-amber-950/60 p-4 text-sm text-amber-200 backdrop-blur-lg"
+            >
+              <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+              <span>{warning}</span>
+            </div>
+          ))}
+
+          {error && !isLoading ? (
+            <div
+              role="alert"
+              className="flex items-start gap-2 rounded-2xl border border-amber-700/50 bg-amber-950/60 p-4 text-sm text-amber-200 backdrop-blur-lg"
+            >
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+              <div className="min-w-0 flex-1">
+                <p>
+                  Request failed ({error}). The API at{" "}
+                  <code className="break-all">{API_DISPLAY_URL}</code> may be down.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setReloadNonce((n) => n + 1)}
+                  className="mt-2 rounded-lg bg-amber-200 px-3 py-1.5 text-xs font-medium text-amber-950 hover:bg-amber-100"
+                >
+                  Retry
+                </button>
+              </div>
+            </div>
           ) : null}
-        </div>
 
-        {error && !isLoading ? (
-          <div
-            role="alert"
-            className="flex items-start gap-2 rounded-xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200"
-          >
-            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
-            <div className="min-w-0 flex-1">
-              <p>
-                Request failed ({error}). The API at{" "}
-                <code className="break-all">{API_DISPLAY_URL}</code> may be down.
-              </p>
-              <button
-                type="button"
-                onClick={() => setReloadNonce((n) => n + 1)}
-                className="mt-2 rounded-lg bg-amber-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-amber-800 dark:bg-amber-200 dark:text-amber-950"
-              >
-                Retry
-              </button>
+          {/* ---- Collage board ---- */}
+          <div className="grid grid-cols-1 gap-6 xl:grid-cols-12">
+            {/* Research question paper */}
+            <section
+              id="query-overview"
+              aria-label="Query overview"
+              className="scroll-mt-28 xl:col-span-7"
+            >
+              <PaperDoc staple tilt="left" className="p-6 sm:p-7">
+                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-neutral-500">
+                  Research question
+                </p>
+                <h1 className="mt-1 text-2xl font-bold leading-snug text-neutral-900">
+                  {query || "Untitled question"}
+                </h1>
+                {search?.anchor_question ? (
+                  <p className="mt-2 text-xs leading-relaxed text-neutral-600">
+                    Effect directions are judged against: “
+                    {search.anchor_question}” — “Positive” supports it,
+                    “Negative” opposes it. Asking the question the other way
+                    round mirrors the verdicts by design.
+                  </p>
+                ) : null}
+              </PaperDoc>
+            </section>
+
+            {/* Key Contradiction Clusters paper */}
+            <div
+              id="evidence-graph"
+              className="scroll-mt-28 xl:col-span-5 xl:-ml-2 xl:mt-10"
+            >
+              <PaperDoc tilt="right" className="p-5">
+                <h2
+                  id="section-graph"
+                  className="text-base font-semibold text-neutral-900"
+                >
+                  Key Contradiction Clusters
+                </h2>
+                <div className="mt-3">
+                  {isLoading ? (
+                    <EvidenceGraphSkeleton />
+                  ) : studies.length > 0 ? (
+                    <EvidenceGraph
+                      query={query}
+                      clusters={comparison?.clusters ?? []}
+                      studies={studies}
+                      claims={claims}
+                      contradictions={comparison?.contradictions ?? []}
+                      tone="paper"
+                      compact
+                    />
+                  ) : error ? null : (
+                    <p role="status" className="text-sm text-neutral-500">
+                      The evidence graph will appear here once studies are
+                      retrieved.
+                    </p>
+                  )}
+                </div>
+                <p className="mt-2 text-center text-[11px] text-neutral-500">
+                  Force snippets — red edges mark contradictions
+                </p>
+              </PaperDoc>
+            </div>
+
+            {/* Summary of Findings sheet */}
+            <div className="xl:col-span-7 xl:-mt-2">
+              <div className="rounded-[3px] bg-neutral-200/90 p-5 shadow-[0_18px_45px_-12px_rgba(0,0,0,0.75)] xl:-rotate-[0.4deg]">
+                <h2 className="text-base font-semibold text-neutral-900">
+                  Summary of Findings
+                </h2>
+                <div className="mt-3">
+                  {isLoading ? (
+                    <div
+                      className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3"
+                      aria-busy="true"
+                      aria-label="Loading findings"
+                    >
+                      {Array.from({ length: 6 }).map((_, i) => (
+                        <div
+                          key={i}
+                          className="h-36 animate-pulse rounded-[3px] bg-neutral-300"
+                        />
+                      ))}
+                    </div>
+                  ) : (
+                    <FindingsGrid claims={claims} />
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* PDF Source Backstop */}
+            <div className="xl:col-span-5 xl:mt-2 xl:rotate-[0.5deg]">
+              {isLoading ? (
+                <div
+                  className="h-64 animate-pulse rounded-2xl border border-neutral-800 bg-neutral-900/70"
+                  aria-busy="true"
+                  aria-label="Loading PDF backstop"
+                />
+              ) : (
+                <PdfBackstop claims={claims} studies={studies} />
+              )}
+            </div>
+
+            {/* Evidence Overview paper */}
+            <div className="xl:col-span-12 xl:-mt-2 xl:rotate-[0.25deg]">
+              {isLoading ? (
+                <EvidenceSummarySkeleton />
+              ) : comparison ? (
+                <EvidenceSummaryPanel
+                  summary={comparison.summary}
+                  studies={studies}
+                />
+              ) : error ? null : (
+                <p role="status" className="text-sm text-neutral-400">
+                  {studies.length > 0
+                    ? "Fewer than two studies retrieved — comparison needs at least two."
+                    : "No synthesis yet — comparison results will appear here."}
+                </p>
+              )}
             </div>
           </div>
-        ) : null}
 
-        {/* Section 1: Query & Evidence Overview */}
-        <section aria-labelledby="section-overview">
-          <SectionHeading
-            icon={LineChart}
-            index="1"
-            title="Query & Evidence Overview"
-            hint="Corpus-level finding counts plus year-by-year breakdown."
-            headingId="section-overview"
-          />
-          {isLoading ? (
-            <EvidenceSummarySkeleton />
-          ) : comparison ? (
-            <EvidenceSummaryPanel summary={comparison.summary} studies={studies} />
-          ) : error ? null : (
-            <p role="status" className="text-sm text-zinc-600">
-              {studies.length > 0
-                ? "Fewer than two studies retrieved — comparison needs at least two."
-                : "No synthesis yet — comparison results will appear here."}
-            </p>
-          )}
-        </section>
-
-        {/* Section 2: Contradiction Explorer (central feature) */}
-        <section aria-labelledby="section-contradictions">
-          <SectionHeading
-            icon={GitCompareArrows}
-            index="2"
-            title="Contradiction Explorer"
-            hint="Opposing findings with PICO differences, observed facts, and cautious hypotheses."
-            headingId="section-contradictions"
-          />
-          {isLoading ? (
-            <ContradictionExplorerSkeleton />
-          ) : comparison ? (
-            <ContradictionExplorer
-              contradictions={comparison.contradictions ?? []}
-              studies={studies}
-              claims={claims}
+          {/* ---- Detail sections ---- */}
+          {/* Section 2: Contradiction Explorer (central feature) */}
+          <section
+            id="contradiction-explorer"
+            aria-labelledby="section-contradictions"
+            className="scroll-mt-28"
+          >
+            <SectionHeading
+              icon={GitCompareArrows}
+              index="2"
+              title="Contradiction Explorer"
+              hint="Opposing findings with PICO differences, observed facts, and cautious hypotheses."
+              headingId="section-contradictions"
             />
-          ) : error ? null : (
-            <p role="status" className="text-sm text-zinc-600">
-              Contradiction analysis will appear here once the corpus is compared.
-            </p>
-          )}
-        </section>
+            {isLoading ? (
+              <ContradictionExplorerSkeleton />
+            ) : comparison ? (
+              <div className={`${glassPanel} p-4 sm:p-5`}>
+                <ContradictionExplorer
+                  contradictions={comparison.contradictions ?? []}
+                  studies={studies}
+                  claims={claims}
+                />
+              </div>
+            ) : error ? null : (
+              <p role="status" className="text-sm text-neutral-400">
+                Contradiction analysis will appear here once the corpus is compared.
+              </p>
+            )}
+          </section>
 
-        {/* Section 3: Interactive Evidence Graph */}
-        <section aria-labelledby="section-graph">
-          <SectionHeading
-            icon={Network}
-            index="3"
-            title="Interactive Evidence Graph"
-            hint="Question → topic clusters → studies. Dashed red edges mark contradictions."
-            headingId="section-graph"
-          />
-          {isLoading ? (
-            <EvidenceGraphSkeleton />
-          ) : studies.length > 0 ? (
-            <EvidenceGraph
-              query={query}
-              clusters={comparison?.clusters ?? []}
-              studies={studies}
-              claims={claims}
-              contradictions={comparison?.contradictions ?? []}
+          {/* Section 4: Corpus Research Gaps */}
+          <section id="research-gaps" aria-labelledby="section-gaps" className="scroll-mt-28">
+            <SectionHeading
+              icon={TriangleAlert}
+              index="4"
+              title="Corpus Research Gaps"
+              hint="Missing or under-represented areas — scoped strictly to the retrieved corpus."
+              headingId="section-gaps"
             />
-          ) : error ? null : (
-            <p role="status" className="text-sm text-zinc-600">
-              The evidence graph will appear here once studies are retrieved.
-            </p>
-          )}
-        </section>
+            {isLoading ? (
+              <ResearchGapsSkeleton />
+            ) : comparison ? (
+              <ResearchGaps gaps={comparison.gaps ?? []} />
+            ) : error ? null : (
+              <p role="status" className="text-sm text-neutral-400">
+                Gap analysis will appear here once the corpus is compared.
+              </p>
+            )}
+          </section>
 
-        {/* Section 4: Corpus Research Gaps */}
-        <section aria-labelledby="section-gaps">
-          <SectionHeading
-            icon={TriangleAlert}
-            index="4"
-            title="Corpus Research Gaps"
-            hint="Missing or under-represented areas — scoped strictly to the retrieved corpus."
-            headingId="section-gaps"
-          />
-          {isLoading ? (
-            <ResearchGapsSkeleton />
-          ) : comparison ? (
-            <ResearchGaps gaps={comparison.gaps ?? []} />
-          ) : error ? null : (
-            <p role="status" className="text-sm text-zinc-600">
-              Gap analysis will appear here once the corpus is compared.
-            </p>
-          )}
-        </section>
-
-        {/* Section 5: Retrieved Papers & Sources */}
-        <section aria-labelledby="section-papers">
-          <SectionHeading
-            icon={ListOrdered}
-            index="5"
-            title="Retrieved Papers & Sources"
-            hint={`${studies.length} paper${studies.length === 1 ? "" : "s"} with extracted PICO design.`}
-            headingId="section-papers"
-          />
-          {isLoading ? (
-            <div className="space-y-3" aria-busy="true" aria-label="Loading studies">
-              {Array.from({ length: 3 }).map((_, i) => (
-                <div
-                  key={i}
-                  className="h-44 animate-pulse rounded-2xl bg-zinc-100 dark:bg-zinc-900"
-                />
-              ))}
-            </div>
-          ) : studies.length > 0 ? (
-            <div className="grid gap-4 lg:grid-cols-2">
-              {studies.map((study) => (
-                <StudyCard
-                  key={study.study_id}
-                  study={study}
-                  effectDirection={effectByStudy.get(study.study_id) ?? null}
-                  conclusion={
-                    primaryClaimByStudy.get(study.study_id)?.conclusion ??
-                    primaryClaimByStudy.get(study.study_id)?.text ??
-                    null
-                  }
-                  evidenceQuote={
-                    primaryClaimByStudy.get(study.study_id)
-                      ?.verbatim_evidence_quote ??
-                    primaryClaimByStudy.get(study.study_id)?.evidence_span ??
-                    null
-                  }
-                />
-              ))}
-            </div>
-          ) : error ? null : (
-            <p role="status" className="flex items-center gap-2 text-sm text-zinc-600">
-              <FlaskConical className="h-4 w-4" aria-hidden="true" />
-              No studies found for this question yet.
-            </p>
-          )}
-        </section>
-      </main>
+          {/* Retrieved Papers & Sources */}
+          <section
+            id="retrieved-papers"
+            aria-labelledby="section-papers"
+            className="scroll-mt-28"
+          >
+            <SectionHeading
+              icon={ListOrdered}
+              index="5"
+              title="Retrieved Papers & Sources"
+              hint={`${studies.length} paper${studies.length === 1 ? "" : "s"} with extracted PICO design.`}
+              headingId="section-papers"
+            />
+            {isLoading ? (
+              <div className="space-y-3" aria-busy="true" aria-label="Loading studies">
+                {Array.from({ length: 3 }).map((_, i) => (
+                  <div
+                    key={i}
+                    className="h-44 animate-pulse rounded-[3px] bg-neutral-100"
+                  />
+                ))}
+              </div>
+            ) : studies.length > 0 ? (
+              <div className="grid gap-4 lg:grid-cols-2">
+                {studies.map((study) => (
+                  <StudyCard
+                    key={study.study_id}
+                    study={study}
+                    effectDirection={effectByStudy.get(study.study_id) ?? null}
+                    conclusion={
+                      primaryClaimByStudy.get(study.study_id)?.conclusion ??
+                      primaryClaimByStudy.get(study.study_id)?.text ??
+                      null
+                    }
+                    evidenceQuote={
+                      primaryClaimByStudy.get(study.study_id)
+                        ?.verbatim_evidence_quote ??
+                      primaryClaimByStudy.get(study.study_id)?.evidence_span ??
+                      null
+                    }
+                  />
+                ))}
+              </div>
+            ) : error ? null : (
+              <p role="status" className="flex items-center gap-2 text-sm text-neutral-400">
+                <FlaskConical className="h-4 w-4" aria-hidden="true" />
+                No studies found for this question yet.
+              </p>
+            )}
+          </section>
+        </main>
+      </div>
     </div>
   );
 }

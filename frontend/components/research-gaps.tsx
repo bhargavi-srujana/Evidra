@@ -1,4 +1,4 @@
-import { Info, TriangleAlert } from "lucide-react";
+import { Info } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 interface ResearchGapsProps {
@@ -12,23 +12,27 @@ export function ResearchGapsSkeleton() {
       {Array.from({ length: 3 }).map((_, i) => (
         <div
           key={i}
-          className="h-12 animate-pulse rounded-xl bg-zinc-100 dark:bg-zinc-900"
+          className="h-12 animate-pulse rounded-xl border border-neutral-800 bg-neutral-900/70"
         />
       ))}
     </div>
   );
 }
 
+/**
+ * Corpus research gaps as neutral glass info cards (informational — not
+ * warnings, so no alert styling).
+ */
 export default function ResearchGaps({ gaps, className }: ResearchGapsProps) {
   if (gaps.length === 0) {
     return (
       <div
         className={cn(
-          "flex items-start gap-2 rounded-xl border border-zinc-200 bg-zinc-50 p-4 text-sm text-zinc-600 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300",
+          "flex items-start gap-2 rounded-2xl border border-neutral-700/70 bg-neutral-900/70 p-4 text-sm text-neutral-300 backdrop-blur-lg",
           className,
         )}
       >
-        <Info className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+        <Info className="mt-0.5 h-4 w-4 shrink-0 text-sky-400" aria-hidden="true" />
         <span>
           No evidence gaps flagged for this corpus — coverage looks reasonably
           broad.
@@ -42,10 +46,10 @@ export default function ResearchGaps({ gaps, className }: ResearchGapsProps) {
       {gaps.map((gap, i) => (
         <li
           key={`${i}-${gap.length}-${gap.slice(0, 48)}`}
-          className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-100"
+          className="flex items-start gap-2.5 rounded-xl border border-neutral-700/70 bg-neutral-900/70 p-3.5 text-sm leading-relaxed text-neutral-300 backdrop-blur-lg"
         >
-          <TriangleAlert
-            className="mt-0.5 h-4 w-4 shrink-0"
+          <Info
+            className="mt-0.5 h-4 w-4 shrink-0 text-sky-400"
             aria-hidden="true"
           />
           <span>{gap}</span>

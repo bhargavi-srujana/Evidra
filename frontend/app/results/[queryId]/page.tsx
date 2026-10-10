@@ -167,7 +167,7 @@ export default function ResultsPage() {
   }, [claims]);
 
   return (
-    <div className="min-h-screen bg-neutral-950 text-neutral-200">
+    <div className="min-h-screen bg-[rgb(35,39,42)] text-neutral-200">
       <DashboardBackground />
 
       <div className="relative z-10 mx-auto w-full max-w-7xl px-4 pt-5 sm:px-6">

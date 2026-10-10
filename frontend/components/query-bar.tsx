@@ -11,7 +11,8 @@ interface QueryBarProps {
   onSearch: (query: string) => void | Promise<void>;
   className?: string;
   /** "dark" renders a charcoal pill for use on light paper mastheads. */
-  tone?: "light" | "dark";
+  /** "transparent" renders a borderless glass bar that stays clear in both color schemes. */
+  tone?: "light" | "dark" | "transparent";
 }
 
 export default function QueryBar({
@@ -34,6 +35,7 @@ export default function QueryBar({
   };
 
   const dark = tone === "dark";
+  const transparent = tone === "transparent";
   return (
     <form
       onSubmit={handleSubmit}
@@ -43,15 +45,21 @@ export default function QueryBar({
       <div
         className={cn(
           "flex w-full items-center gap-2 rounded-2xl border p-2 shadow-sm focus-within:ring-2",
-          dark
-            ? "border-neutral-700 bg-neutral-900 focus-within:border-neutral-500 focus-within:ring-neutral-500/30"
-            : "border-zinc-200 bg-white focus-within:border-zinc-900 focus-within:ring-zinc-900/20 dark:border-zinc-800 dark:bg-zinc-950 dark:focus-within:border-zinc-100 dark:focus-within:ring-zinc-100/20",
+          transparent
+            ? "border-neutral-400/60 bg-white/10 backdrop-blur-sm focus-within:border-neutral-500 focus-within:ring-neutral-500/20"
+            : dark
+              ? "border-neutral-700 bg-neutral-900 focus-within:border-neutral-500 focus-within:ring-neutral-500/30"
+              : "border-zinc-200 bg-white focus-within:border-zinc-900 focus-within:ring-zinc-900/20 dark:border-zinc-800 dark:bg-zinc-950 dark:focus-within:border-zinc-100 dark:focus-within:ring-zinc-100/20",
         )}
       >
         <Search
           className={cn(
             "ml-2 h-5 w-5 shrink-0",
-            dark ? "text-neutral-500" : "text-zinc-400",
+            transparent
+              ? "text-neutral-500"
+              : dark
+                ? "text-neutral-500"
+                : "text-zinc-400",
           )}
           aria-hidden="true"
         />
@@ -66,9 +74,11 @@ export default function QueryBar({
           placeholder="Search Evidra — ask a research question…"
           className={cn(
             "h-11 w-full bg-transparent text-sm outline-none",
-            dark
-              ? "text-neutral-100 placeholder:text-neutral-500"
-              : "text-zinc-900 placeholder:text-zinc-400 dark:text-zinc-50",
+            transparent
+              ? "text-neutral-800 placeholder:text-neutral-500"
+              : dark
+                ? "text-neutral-100 placeholder:text-neutral-500"
+                : "text-zinc-900 placeholder:text-zinc-400 dark:text-zinc-50",
           )}
         />
         <button
@@ -76,9 +86,11 @@ export default function QueryBar({
           disabled={isLoading || query.trim().length === 0}
           className={cn(
             "inline-flex h-11 shrink-0 items-center gap-2 rounded-xl px-5 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50",
-            dark
-              ? "bg-neutral-100 text-neutral-900 hover:bg-white"
-              : "bg-zinc-900 text-white hover:bg-zinc-700 dark:bg-zinc-50 dark:text-zinc-900 dark:hover:bg-zinc-200",
+            transparent
+              ? "border border-neutral-400/70 bg-transparent text-neutral-700 hover:bg-neutral-900/5"
+              : dark
+                ? "bg-neutral-100 text-neutral-900 hover:bg-white"
+                : "bg-zinc-900 text-white hover:bg-zinc-700 dark:bg-zinc-50 dark:text-zinc-900 dark:hover:bg-zinc-200",
           )}
         >
           {isLoading ? (

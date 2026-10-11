@@ -116,6 +116,19 @@ async def lifespan(app: FastAPI):
     await close_mongo()
 
 
+def _cors_origins(settings) -> list[str]:
+    origins = ["http://localhost:3000", "http://127.0.0.1:3000"]
+    for chunk in (settings.FRONTEND_URL or "").split(","):
+        url = chunk.strip().rstrip("/")
+        if url and url not in origins:
+            origins.append(url)
+    for chunk in (settings.CORS_EXTRA_ORIGINS or "").split(","):
+        url = chunk.strip().rstrip("/")
+        if url and url not in origins:
+            origins.append(url)
+    return origins
+
+
 def create_app() -> FastAPI:
     settings = get_settings()
 
@@ -128,7 +141,8 @@ def create_app() -> FastAPI:
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+        allow_origins=_cors_origins(settings),
+        allow_origin_regex=r"https://.*\.vercel\.app",
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

@@ -107,6 +107,11 @@ class Settings(BaseSettings):
     SERPAPI_API_KEY: str = ""
     S2_API_KEY: str = ""
 
+    # Comma-separated extra frontend origins to allow via CORS,
+    # e.g. FRONTEND_URL="https://evidra-ten.vercel.app" on Render.
+    FRONTEND_URL: str = ""
+    CORS_EXTRA_ORIGINS: str = ""
+
 
 @lru_cache
 def get_settings() -> Settings:
